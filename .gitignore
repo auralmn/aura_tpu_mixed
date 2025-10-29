@@ -18,3 +18,5 @@ models/**
 *.ipynb
 *.pyc
 models/spm/spiece.corpus.txt
+archives
+./docs

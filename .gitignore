@@ -13,7 +13,7 @@ neural_ref  # neural_ref/
 data/**
 data_production
 models/**
-*.md
+
 *.pdf
 *.ipynb
 *.pyc

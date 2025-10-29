@@ -40,7 +40,7 @@ from aura.bio_inspired.enhanced_spiking_retrieval import EnhancedSpikingRetrieva
 # GCS integration
 try:
     from google.cloud import storage
-    HAS_GCS = True
+    HAS_GCS = False
 except ImportError:
     HAS_GCS = False
     print("Warning: Google Cloud Storage not available. Install with 'pip install google-cloud-storage'")
@@ -639,11 +639,13 @@ class BioInspiredAURATrainingPipeline:
             logger.info(f"Training results exported to {output_path}")
             
             # Also save to GCS if available
+            """
             if HAS_GCS and self.bucket:
                 gcs_path = f"{self.config.gcs_checkpoint_prefix}results/bio_training_results.json"
                 blob = self.bucket.blob(gcs_path)
                 blob.upload_from_filename(output_path)
                 logger.info(f"Training results saved to GCS: {gcs_path}")
+            """
         except Exception as e:
             logger.error(f"Failed to export training results: {e}")
 
@@ -656,14 +658,14 @@ def main():
                        help="Training phase to execute")
     parser.add_argument("--output", type=str, default="bio_training_results.json",
                        help="Output file for training results")
-    parser.add_argument("--gcs-bucket", type=str, default="aura-bio-training-data",
+    parser.add_argument("--gcs-bucket", type=str, default="aura_tpu_data",
                        help="GCS bucket name for data storage")
     
     args = parser.parse_args()
     
     # Initialize training configuration
     config = BioInspiredTrainingConfig()
-    config.gcs_bucket_name = args.gcs_bucket
+    config.gcs_bucket_name = "aura_tpu_data"
     
     # Initialize training pipeline
     pipeline = BioInspiredAURATrainingPipeline(config)

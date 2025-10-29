@@ -51,12 +51,12 @@ class TokenDecoder(nn.Module):
         modulated_rates = rate_vector * (1 + self.frequency_bias * phase_mod)
         
         # Map firing-rate vector to vocabulary logits
-        logits = self.fc(modulated_rates)  # [batch, vocab_size]
-        
+        #logits = self.fc(modulated_rates)  # [batch, vocab_size]
+        logits = self.fc(rate_vector)  # [..., vocab]
         # Convert logits to probabilities
-        probs = jax.nn.softmax(logits, axis=-1)  # [batch, vocab_size]
+        # probs = jax.nn.softmax(logits, axis=-1)  # [batch, vocab_size]
         
-        return probs
+        return logits
     
     def sample_tokens(self, rate_vector: jnp.ndarray, key: jax.random.PRNGKey) -> jnp.ndarray:
         """
@@ -69,11 +69,9 @@ class TokenDecoder(nn.Module):
         Returns:
             Sampled token indices [batch]
         """
-        # Get probabilities
-        token_probs = self.__call__(rate_vector)  # [batch, vocab_size]
-        
+        logits = self.__call__(rate_vector)
         # Sample tokens
-        token_indices = jax.random.categorical(key, token_probs)  # [batch]
+        token_indices = jax.random.categorical(key, logits)  # [batch]
         
         return token_indices
     

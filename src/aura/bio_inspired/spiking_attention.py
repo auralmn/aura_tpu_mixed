@@ -42,10 +42,10 @@ class SpikingAttentionJAX(nn.Module):
         def lif_step(state, token_id):
             v, spikes = state
             # Ensure token_id is within bounds
-            token_id = jnp.clip(token_id, 0, vocab_size - 1).astype(jnp.int32)
+            token_id_int = jnp.clip(token_id, 0, vocab_size - 1).astype(jnp.int32)
             
             # Update membrane potential
-            v_new = self.decay * v.at[token_id].get() + 1.0
+            v_new = self.decay * v.at[token_id_int].get() + 1.0
             
             # Check for spike
             spiked = v_new >= self.theta
@@ -54,10 +54,10 @@ class SpikingAttentionJAX(nn.Module):
             v_reset = jnp.where(spiked, v_new - self.theta, v_new)
             
             # Update potentials
-            v = v.at[token_id].set(v_reset)
+            v = v.at[token_id_int].set(v_reset)
             
             # Update spike counts
-            spikes_new = spikes.at[token_id].add(spiked.astype(jnp.int32))
+            spikes_new = spikes.at[token_id_int].add(spiked.astype(jnp.int32))
             
             return (v, spikes_new), None
         
@@ -65,7 +65,8 @@ class SpikingAttentionJAX(nn.Module):
         (v_final, spikes_final), _ = jax.lax.scan(lif_step, (v, spikes), token_seq)
         
         # Determine top-k winners
-        top_k_indices = jax.lax.top_k(spikes_final, self.k_winners)[1]
+        k = int(min(self.k_winners, int(vocab_size)))
+        top_k_vals, top_k_indices = jax.lax.top_k(v_final, k)
         winners = jnp.zeros(vocab_size).at[top_k_indices].set(1)
         
         # Compute learning rate gains

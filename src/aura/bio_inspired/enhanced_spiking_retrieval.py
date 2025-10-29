@@ -21,8 +21,9 @@ class EnhancedSpikingRetrievalCore(nn.Module):
     Liquid-MoE spiking retrieval core with phasor-based temporal features.
     Retrieves context vectors from neuromorphic memory based on input queries.
     """
-    hidden_dim: int
-    num_experts: int
+    hidden_dim: int = 768
+    embed_dim: int = 768
+    num_experts: int = 2
     expert_dim: int = 64
     T: int = 20  # Number of time steps for temporal simulation
     dt: float = 1e-3  # Time step
@@ -59,7 +60,7 @@ class EnhancedSpikingRetrievalCore(nn.Module):
         self.phasor_bank = PhasorBankJAX(delta0=7.0, H=self.phasor_harmonics)
         self.spiking_attention = SpikingAttentionJAX()
         # Hierarchical gating: assign experts to groups in round-robin if enabled
-        if self.group_count and self.group_count > 1:
+        if int(self.group_count) > 1:
             self.group_gate = nn.Dense(self.group_count)
             self.group_index = [i % self.group_count for i in range(self.num_experts)]
             # Precompute one-hot group map: [num_experts, group_count]
@@ -81,11 +82,12 @@ class EnhancedSpikingRetrievalCore(nn.Module):
         Returns:
             Context vector [batch, hidden_dim]
         """
-        batch_size = query_embedding.shape[0]
-        query_mean = jnp.mean(query_embedding, axis=-1)
+        x = self._normalize_in_dim(query_embedding)
+        batch_size = x.shape[0]
+        query_mean = jnp.mean(x, axis=-1)
         temporal_features = jax.vmap(self.phasor_bank)(query_mean)
-        K = min(32, query_embedding.shape[-1])
-        topk_idx = jax.lax.top_k(jnp.abs(query_embedding), K)[1]
+        K = min(32, x.shape[-1])
+        topk_idx = jax.lax.top_k(jnp.abs(x), K)[1]
         vocab_size = int(query_embedding.shape[-1])
         attention_gains = jax.vmap(self.spiking_attention, in_axes=(0, None))(topk_idx.astype(jnp.int32), vocab_size)
         if self.use_bio_gating:
@@ -127,8 +129,8 @@ class EnhancedSpikingRetrievalCore(nn.Module):
         temp = jnp.asarray(1.0 if temperature is None else temperature)
         gate_weights = nn.softmax(gate_logits / temp, axis=-1)  # [batch, num_experts]
         # Optional top-k soft routing
-        if self.top_k_route is not None and self.top_k_route > 1:
-            k = jnp.minimum(self.top_k_route, self.num_experts)
+        if (self.top_k_route is not None) and (int(self.top_k_route) > 1):
+            k = int(min(self.top_k_route, self.num_experts))
             vals, idx = jax.lax.top_k(gate_weights, k)
             mask = jnp.zeros_like(gate_weights)
             # scatter 1.0 at top-k indices per batch
@@ -138,7 +140,7 @@ class EnhancedSpikingRetrievalCore(nn.Module):
             denom = jnp.sum(gated, axis=-1, keepdims=True) + 1e-9
             gate_weights = gated / denom
         # Compute expert outputs and combine
-        expert_outs = [expert(query_embedding) for expert in self.experts]  # list of [batch, hidden_dim]
+        expert_outs = [expert(x) for expert in self.experts]  # list of [batch, hidden_dim]
         expert_stack = jnp.stack(expert_outs, axis=1)  # [batch, num_experts, hidden_dim]
         # Apply freezing mask if provided, else use module-level freeze flag
         if freeze_mask is not None:
@@ -148,6 +150,17 @@ class EnhancedSpikingRetrievalCore(nn.Module):
             expert_stack = jax.lax.stop_gradient(expert_stack)
         context_vector = jnp.einsum('bn,bnh->bh', gate_weights, expert_stack)  # [batch, hidden_dim]
         return context_vector
+
+    def _normalize_in_dim(self, x: jnp.ndarray) -> jnp.ndarray:
+        """Ensure last-dim == self.embed_dim by slice-or-pad (zero pad)."""
+        d = x.shape[-1]
+        if d == self.embed_dim:
+            return x
+        elif d > self.embed_dim:
+            return x[..., :self.embed_dim]
+        else:
+            pad = self.embed_dim - d
+            return jnp.pad(x, ((0, 0), (0, pad)), mode='constant')
 
     def compute_gate_weights(self, query_embedding: jnp.ndarray, active_experts: int = None, merit_bias: jnp.ndarray = None, temperature: jnp.ndarray = None, inactive_mask: jnp.ndarray = None, thalamic_bias: jnp.ndarray = None) -> jnp.ndarray:
         """Compute routing weights without producing a context vector."""

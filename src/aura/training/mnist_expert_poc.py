@@ -32,7 +32,7 @@ from aura.bio_inspired.personality_engine import PersonalityEngineJAX
 
 
 class MNISTExpertPOC(nn.Module):
-    hidden_dim: int = 128
+    hidden_dim: int = 768
     num_classes: int = 10
     freeze_experts: bool = False
     personality_traits: tuple = (0.6, 0.6, 0.5, 0.5, 0.4)  # O, C, E, A, N
@@ -214,9 +214,14 @@ def train_step(state, x, y, active_experts: int, freeze_mask: jnp.ndarray, teach
     def loss_fn(params):
         logits = state.apply_fn(params, x, active_experts, freeze_mask, merit_bias, temperature, inactive_mask)
         ce_loss = optax.softmax_cross_entropy_with_integer_labels(logits, y).mean()
-        d_loss = jnp.where(alpha_distill > 0,
-                           state.apply_fn(params, x, teacher_idx, student_idx, teacher_weights, method=MNISTExpertPOC.compute_distill_loss),
-                           0.0)
+        d_loss = jax.lax.cond(
+            jnp.greater(alpha_distill, 0.0),
+            lambda _: state.apply_fn(
+                params, x, teacher_idx, student_idx, teacher_weights,
+                method=MNISTExpertPOC.compute_distill_loss),
+            lambda _: jnp.array(0.0, dtype=jnp.float32),
+            operand=None,
+        )
         # EMC-style soft freeze penalty for non-selected experts (output-space)
         lambda_emc = emc_lambda
         outs = state.apply_fn(params, x, method=MNISTExpertPOC.compute_expert_outputs)  # [batch, num_exp, hidden]
@@ -522,7 +527,7 @@ def run_training(target_acc=0.95, max_epochs=10, batch_size=256, hidden_dim=128,
 def main():
     parser = argparse.ArgumentParser(description="MNIST Expert POC")
     parser.add_argument('--batch-size', type=int, default=256)
-    parser.add_argument('--hidden-dim', type=int, default=128)
+    parser.add_argument('--hidden-dim', type=int, default=768)
     parser.add_argument('--max-epochs', type=int, default=12)
     parser.add_argument('--target-acc', type=float, default=0.95)
     parser.add_argument('--freeze-experts', dest='freeze_experts', action='store_true', default=True)
@@ -556,4 +561,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

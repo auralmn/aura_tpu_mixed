@@ -35,6 +35,7 @@ class SPMTokenizer:
         max_sentence_length: int = 1000000,
         hard_vocab_limit: bool = False,
         byte_fallback: bool = False,
+        train_extremely_large_corpus: bool = False,
         clean_controls: bool = True,
         normalize_spaces: bool = True,
         use_iterator: bool = False,
@@ -92,14 +93,17 @@ class SPMTokenizer:
                     if s:
                         yield s
         # Train either from iterator or from a written corpus file
+        # Note: <pad>, <bos>, <eos>, <unk> are built-in control tokens
+        # and should NOT be in user_defined_symbols
         if user_defined_symbols is None:
-            uds = ["<pad>"]
+            uds = []
         else:
-            # Ensure <pad> present and de-duplicate while preserving order
+            # Filter out built-in control tokens and de-duplicate while preserving order
+            built_in_tokens = {"<pad>", "<bos>", "<eos>", "<unk>", "<s>", "</s>"}
             seen = set()
             uds = []
-            for s in ["<pad>"] + list(user_defined_symbols):
-                if s not in seen:
+            for s in list(user_defined_symbols):
+                if s not in seen and s not in built_in_tokens:
                     seen.add(s)
                     uds.append(s)
         uds_arg = ",".join(uds) if uds else ""
@@ -115,6 +119,7 @@ class SPMTokenizer:
                 max_sentence_length=int(max_sentence_length),
                 hard_vocab_limit=hard_vocab_limit,
                 byte_fallback=byte_fallback,
+                train_extremely_large_corpus=train_extremely_large_corpus,
             )
         else:
             corpus_path = model_prefix + ".corpus.txt"
@@ -132,6 +137,7 @@ class SPMTokenizer:
                 max_sentence_length=int(max_sentence_length),
                 hard_vocab_limit=hard_vocab_limit,
                 byte_fallback=byte_fallback,
+                train_extremely_large_corpus=train_extremely_large_corpus,
             )
         return model_prefix + ".model"
 
@@ -208,7 +214,7 @@ if __name__ == "__main__":
         clean_controls=bool(args.clean_controls),
         normalize_spaces=bool(args.normalize_spaces),
         use_iterator=bool(args.use_iterator),
-        ascii_only=bool(args.ascii_only),
+        ascii_only=bool(args.ascii_only, default=True),
         user_defined_symbols=[s for s in (args.user_symbols.split(',') if args.user_symbols else []) if s],
     )
     print(f"Trained SentencePiece model saved to: {model_path}")

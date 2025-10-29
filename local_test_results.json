@@ -1,8 +1,8 @@
 {
-  "total_duration": 15.154937982559204,
+  "total_duration": 6.297836065292358,
   "metrics": {
     "component_initialization": {
-      "duration": 4.655475854873657,
+      "duration": 2.720242977142334,
       "retrieval_core_shape": [
         2,
         64
@@ -22,14 +22,14 @@
       ]
     },
     "consciousness_integration": {
-      "duration": 0.43587207794189453,
+      "duration": 0.36769914627075195,
       "final_consciousness_level": 0.0,
       "workspace_size": 0,
       "knowledge_buffer_size": 0,
       "integration_successful": true
     },
     "self_teaching_functionality": {
-      "duration": 10.06109881401062,
+      "duration": 3.206272602081299,
       "generation_without_context_shape": [
         2,
         10

@@ -177,7 +177,7 @@ class SelfTeachingAdapter:
         th_bias, hyp_temp = _controls_from_emb(prompt_embeddings)
 
         def retrieval_fn(query_embedding):
-            return self.retrieval_core.apply(self.retrieval_params, query_embedding, gate_bias=th_bias, temperature=hyp_temp)
+            return self.retrieval_core.apply(self.retrieval_params, query_embedding, temperature=hyp_temp)
         
         # Add the retrieve_context method to the function
         retrieval_fn.retrieve_context = retrieval_fn

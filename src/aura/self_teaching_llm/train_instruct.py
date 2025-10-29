@@ -112,4 +112,12 @@ def main():
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    import contextlib, jax
+    @contextlib.contextmanager
+    def _hp():
+        old = jax.config.read('jax_default_matmul_precision')
+        jax.config.update('jax_default_matmul_precision', 'highest')
+        try: yield
+        finally: jax.config.update('jax_default_matmul_precision', old)
+    with _hp():
+        main()

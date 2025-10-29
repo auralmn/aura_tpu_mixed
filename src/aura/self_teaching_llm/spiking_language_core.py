@@ -72,8 +72,8 @@ class SpikingLanguageCore(nn.Module):
                 if self.use_rope:
                     dim_even = projected_input.shape[-1] - (projected_input.shape[-1] % 2)
                     if dim_even > 0:
-                        rot_even = apply_rope(projected_input[..., :dim_even], cos_cache[t], sin_cache[t])
-                        inp_t = jnp.concatenate([rot_even, projected_input[..., dim_even:]], axis=-1)
+                        rot_even = apply_rope(projected_input[:, :dim_even], cos_cache[t], sin_cache[t])
+                        inp_t = jnp.concatenate([rot_even, projected_input[:, dim_even:]], axis=-1)
                 dv = (-v + recurrent_input + inp_t) / self.tau * self.dt
                 v = v + dv
                 spike = (v >= self.v_th).astype(jnp.float32)
@@ -95,8 +95,8 @@ class SpikingLanguageCore(nn.Module):
                 if self.use_rope:
                     dim_even = projected_input.shape[-1] - (projected_input.shape[-1] % 2)
                     if dim_even > 0:
-                        rot_even = apply_rope(projected_input[..., :dim_even], cos_cache[t], sin_cache[t])
-                        inp_t = jnp.concatenate([rot_even, projected_input[..., dim_even:]], axis=-1)
+                        rot_even = apply_rope(projected_input[:, :dim_even], cos_cache[t], sin_cache[t])
+                        inp_t = jnp.concatenate([rot_even, projected_input[:, dim_even:]], axis=-1)
                 r = jax.nn.sigmoid(self.gate_r(state + inp_t))  # [batch, hidden]
                 state = alpha * state + (1.0 - alpha) * inp_t
                 out_t = r * state + (1.0 - r) * inp_t

@@ -1,12 +1,9 @@
-#!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
-
 from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+from jax import random
 from flax import linen as nn
-from typing import Any, Callable, Optional, Tuple
 
 
 class SpikingRetrievalCore(nn.Module):
@@ -17,111 +14,109 @@ class SpikingRetrievalCore(nn.Module):
     hidden_dim: int
     num_experts: int
     expert_dim: int = 64
-    T: int = 20  # Number of time steps for temporal simulation
-    poisson_encoding: bool = True  # Enable Poisson encoding for input spikes
-    dt: float = 1e-3  # Time step
-    tau: float = 20e-3  # Membrane time constant
-    v_th: float = 0.5  # Spike threshold
-    v_reset: float = 0.0  # Reset voltage
-    
+    T: int = 20
+    poisson_encoding: bool = True
+    dt: float = 1e-3
+    tau: float = 20e-3
+    v_th: float = 0.5
+    v_reset: float = 0.0
+
     def setup(self):
-        # Initialize experts as random projection matrices
-        # Each expert is a matrix that transforms input to hidden representation
-        self.experts = self.param('experts', 
-                                nn.initializers.normal(stddev=0.1),
-                                (self.num_experts, self.expert_dim, self.hidden_dim))
-        
-        # Gating kernel to determine expert activation (explicit shape)
-        self.gate_kernel = self.param(
-            'gate_kernel', nn.initializers.normal(stddev=0.1), (self.expert_dim, self.num_experts)
+        self.seed = 0;
+        self.key = random.key(0)
+        # Linear projection to expert_dim so downstream shapes are stable.
+        self.in_proj = nn.Dense(self.expert_dim, use_bias=False, name="in_proj")
+
+        # Experts: [num_experts, expert_dim, hidden_dim]
+        self.experts = self.param(
+            "experts",
+            nn.initializers.normal(stddev=0.1),
+            (self.num_experts, self.expert_dim, self.hidden_dim),
         )
-    
-    def __call__(self, query_embedding: jnp.ndarray, gate_bias: jnp.ndarray | None = None, temperature: jnp.ndarray | None = None) -> jnp.ndarray:
+
+        # Gating kernel: [expert_dim, num_experts]
+        self.gate_kernel = self.param(
+            "gate_kernel",
+            nn.initializers.normal(stddev=0.1),
+            (self.expert_dim, self.num_experts),
+        )
+
+    def __call__(
+        self,
+        query_embedding: jnp.ndarray,
+        gate_bias: jnp.ndarray | None = None,
+        temperature: jnp.ndarray | None = None,
+    ) -> jnp.ndarray:
         """
-        Retrieve context from neuromorphic memory using Liquid-MoE mechanism.
-        
         Args:
-            query_embedding: Input query embedding [batch, embed_dim]
-            
+            query_embedding: [batch, embed_dim]
         Returns:
-            Context vector [batch, hidden_dim]
+            context: [batch, hidden_dim]
         """
-        # Poisson encoding of input
+        batch = query_embedding.shape[0]
+        dtype = query_embedding.dtype
+
+        # 1) Project input to expert_dim once; use everywhere below.
+        x = self.in_proj(query_embedding).astype(dtype)  # [batch, expert_dim]
+
+        # 2) (Optional) Poisson encoding across time
         if self.poisson_encoding:
-            # Normalize input to [0,1] range for Poisson encoding
-            normalized_input = jax.nn.sigmoid(query_embedding)
-            # Simulate over T time steps
-            input_spikes = jax.random.bernoulli(jax.random.PRNGKey(0), normalized_input, 
-                                              shape=(self.T,) + query_embedding.shape)
+            
+            
+            # Normalize to [0,1] for rate -> spikes
+            rates = jax.nn.sigmoid(x)  # [batch, expert_dim]
+            _, key= random.split(self.key)
+            input_spikes = jax.random.bernoulli(
+                key, rates, shape=(self.T,) + rates.shape
+            ).astype(dtype)  # [T, batch, expert_dim]
         else:
-            # Direct input without encoding
-            input_spikes = jnp.repeat(jnp.expand_dims(query_embedding, 0), self.T, axis=0)
-        
-        # Get gating logits and probabilities (explicit matmul)
-        gate_logits = jnp.dot(query_embedding, self.gate_kernel)  # [batch, num_experts]
+            input_spikes = jnp.repeat(x[None, ...], self.T, axis=0)  # [T, batch, expert_dim]
+
+        # 3) Gating on the same projected features x
+        gate_logits = x @ self.gate_kernel  # [batch, num_experts]
         if gate_bias is not None:
-            gate_logits = gate_logits + jnp.asarray(gate_bias)[None, :]
-        temp = jnp.asarray(1.0 if temperature is None else temperature)
-        gate_probs = jax.nn.softmax(gate_logits / temp)  # [batch, num_experts]
-        
-        # Initialize membrane potentials for this batch
-        # Each expert has a membrane potential for each batch item
-        v = jnp.zeros((self.num_experts, query_embedding.shape[0], self.hidden_dim))
-        
-        # Simulate spiking dynamics over time
-        spike_accum = jnp.zeros((self.num_experts, query_embedding.shape[0], self.hidden_dim))
-        
-        for t in range(self.T):
-            # Apply experts to spikes at time t
-            for i in range(self.num_experts):
-                # Apply each expert transformation
-                current = jnp.dot(input_spikes[t], self.experts[i])  # [batch, hidden_dim]
-                
-                # LIF neuron dynamics
-                dv = (current - v[i]) / self.tau * self.dt
-                new_v = v[i] + dv
-                
-                # Spike generation (Heaviside step function)
-                spike = (new_v >= self.v_th).astype(jnp.float32)
-                
-                # Voltage reset after spike
-                new_v = new_v * (1 - spike) + self.v_reset * spike
-                
-                # Update membrane potential
-                v = v.at[i].set(new_v)
-                
-                # Accumulate spikes
-                spike_accum = spike_accum.at[i].add(spike)
-        
-        # Average spikes over time steps
-        avg_spikes = spike_accum / self.T  # [num_experts, batch, hidden_dim]
-        
-        # Transpose to [batch, num_experts, hidden_dim]
-        avg_spikes = jnp.transpose(avg_spikes, (1, 0, 2))
-        
-        # Weight outputs by gating probabilities
-        gate_probs_expanded = jnp.expand_dims(gate_probs, -1)  # [batch, num_experts, 1]
-        gate_probs_expanded = jnp.repeat(gate_probs_expanded, self.hidden_dim, axis=-1)  # [batch, num_experts, hidden_dim]
-        
+            gate_logits = gate_logits + jnp.asarray(gate_bias, dtype=gate_logits.dtype)[None, :]
+        temp = jnp.asarray(1.0 if temperature is None else temperature, dtype=jnp.float32)
+        gate_probs = jax.nn.softmax((gate_logits.astype(jnp.float32) / temp), axis=-1).astype(gate_logits.dtype)
+        # shape: [batch, num_experts]
+
+        # 4) LIF dynamics over time using scan (no Python loop)
+        def expert_step(v_i, spikes_t, expert_matrix):
+            # spikes_t: [batch, expert_dim], expert_matrix: [expert_dim, hidden_dim]
+            current = spikes_t @ expert_matrix  # [batch, hidden_dim]
+            dv = (current - v_i) / self.tau * self.dt
+            new_v = v_i + dv
+            spike = (new_v >= self.v_th).astype(dtype)
+            new_v = new_v * (1.0 - spike) + self.v_reset * spike
+            return new_v, spike  # both [batch, hidden_dim]
+
+        def time_step(v_all, spikes_t):
+            # v_all: [num_experts, batch, hidden_dim]
+            # spikes_t: [batch, expert_dim]
+            # map across experts dimension
+            v_all, spike_t = jax.vmap(expert_step, in_axes=(0, None, 0))(v_all, spikes_t, self.experts)
+            # spike_t: [num_experts, batch, hidden_dim]
+            return v_all, spike_t
+
+        v0 = jnp.zeros((self.num_experts, batch, self.hidden_dim), dtype=dtype)
+        _, spikes_all = jax.lax.scan(time_step, v0, input_spikes)
+        # spikes_all: [T, num_experts, batch, hidden_dim]
+
+        # 5) Average over time -> [num_experts, batch, hidden_dim] -> [batch, num_experts, hidden_dim]
+        avg_spikes = jnp.mean(spikes_all, axis=0).transpose(1, 0, 2)
+
+        # 6) Combine with gate probabilities
+        gate_probs_expanded = gate_probs[:, :, None]  # [batch, num_experts, 1]
         weighted_outputs = avg_spikes * gate_probs_expanded  # [batch, num_experts, hidden_dim]
         final_output = jnp.sum(weighted_outputs, axis=1)  # [batch, hidden_dim]
-        
+
         return final_output
-    
-    def retrieve_context(self, memory_query: jnp.ndarray, gate_bias: jnp.ndarray | None = None, temperature: jnp.ndarray | None = None) -> jnp.ndarray:
-        """
-        Retrieve context from neuromorphic memory.
-        
-        Args:
-            memory_query: Query embedding [batch, query_dim]
-            
-        Returns:
-            Context vector h_t [batch, hidden_dim]
-        """
-        # Normalize query into [0,1] range for Poisson encoding (simplified)
-        normalized_query = jax.nn.sigmoid(memory_query)
-        
-        # Run through spiking Liquid-MoE experts
-        h_t = self.__call__(normalized_query, gate_bias=gate_bias, temperature=temperature)  # [batch, hidden_dim]
-        
-        return h_t
+
+    def retrieve_context(
+        self,
+        memory_query: jnp.ndarray,
+        gate_bias: jnp.ndarray | None = None,
+        temperature: jnp.ndarray | None = None,
+    ) -> jnp.ndarray:
+        # Delegates to __call__; keep API for backwards compat
+        return self.__call__(memory_query, gate_bias=gate_bias, temperature=temperature)

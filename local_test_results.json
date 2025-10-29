@@ -1,0 +1,54 @@
+{
+  "total_duration": 15.154937982559204,
+  "metrics": {
+    "component_initialization": {
+      "duration": 4.655475854873657,
+      "retrieval_core_shape": [
+        2,
+        64
+      ],
+      "language_core_shape": [
+        2,
+        64
+      ],
+      "decoder_shape": [
+        2,
+        1000
+      ],
+      "components_initialized": [
+        "retrieval_core",
+        "language_core",
+        "token_decoder"
+      ]
+    },
+    "consciousness_integration": {
+      "duration": 0.43587207794189453,
+      "final_consciousness_level": 0.0,
+      "workspace_size": 0,
+      "knowledge_buffer_size": 0,
+      "integration_successful": true
+    },
+    "self_teaching_functionality": {
+      "duration": 10.06109881401062,
+      "generation_without_context_shape": [
+        2,
+        10
+      ],
+      "generation_with_context_shape": [
+        2,
+        10
+      ],
+      "rates_without_context_count": 10,
+      "rates_with_context_count": 10,
+      "functionality_tested": [
+        "generation",
+        "consciousness_integration"
+      ]
+    }
+  },
+  "tests_completed": [
+    "component_initialization",
+    "consciousness_integration",
+    "self_teaching_functionality"
+  ]
+}

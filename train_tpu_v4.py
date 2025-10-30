@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
+import os, json, argparse, time
+import numpy as np
+
+import jax
+import jax.numpy as jnp
+from jax import random, jit
+from flax import linen as nn
+from flax.training import train_state
+import optax
+
+try:
+    from sentence_transformers import SentenceTransformer
+except Exception as e:
+    SentenceTransformer = None
+
+PLUTCHIK_LABELS = ['joy','trust','fear','surprise','sadness','disgust','anger','anticipation']
+COMPASS_INTENTS = ['inform','negotiate','question','clarify','social','express','command','request']
+INTENT_MAPPING = {
+    'share_news': 'inform', 'ask_help': 'request', 'clarify': 'clarify',
+    'complain': 'express', 'thank': 'social', 'propose': 'negotiate'
+}
+TONE_TO_PROSODY = {
+    'ecstatic': {'energy': 0.95, 'pitch_var': 0.9, 'tempo': 1.3},
+    'urgent': {'energy': 0.9, 'pitch_var': 0.8, 'tempo': 1.4},
+    'neutral': {'energy': 0.5, 'pitch_var': 0.4, 'tempo': 1.0},
+}
+
+class ConsciousnessAwareSNN(nn.Module):
+    num_experts: int = 5
+    hidden_dim: int = 256
+    sbert_dim: int = 384
+
+    @nn.compact
+    def __call__(self, sbert_embeddings, pos_tags, syntax_features, training=True):
+        pauses = nn.sigmoid(nn.Dense(1)(nn.relu(nn.Dense(32)(syntax_features)))).squeeze(-1)
+        stress = nn.sigmoid(nn.Dense(1)(nn.relu(nn.Dense(32)(pos_tags)))).squeeze(-1)
+        pitch = nn.relu(nn.Dense(64)(jnp.concatenate([jnp.mean(stress, axis=1, keepdims=True), jnp.max(pauses, axis=1, keepdims=True)], axis=-1)))
+        energy = nn.relu(nn.Dense(64)(jnp.concatenate([jnp.std(stress, axis=1, keepdims=True), jnp.sum(pauses, axis=1, keepdims=True)], axis=-1)))
+        emotion_h = nn.relu(nn.Dense(128)(jnp.concatenate([sbert_embeddings, pitch, energy], axis=-1)))
+        plutchik_probs = nn.softmax(nn.Dense(8)(emotion_h))
+        intent_h = nn.relu(nn.Dense(128)(jnp.concatenate([sbert_embeddings, emotion_h, pitch], axis=-1)))
+        primary_intent = nn.softmax(nn.Dense(8)(intent_h))
+        urgency = nn.sigmoid(nn.Dense(1)(intent_h))
+        certainty = nn.sigmoid(nn.Dense(1)(intent_h))
+        formality = nn.sigmoid(nn.Dense(1)(intent_h))
+        politeness = nn.sigmoid(nn.Dense(1)(intent_h))
+        composite = jnp.concatenate([sbert_embeddings, emotion_h, intent_h], axis=-1)
+        gate_weights = nn.softmax(nn.Dense(self.num_experts)(composite))
+        output = nn.Dense(self.hidden_dim)(composite)
+        return {
+            'output': output,
+            'emotions': {'plutchik': plutchik_probs},
+            'intent': {
+                'primary_intent': primary_intent,
+                'modifiers': {
+                    'urgency': urgency,
+                    'certainty': certainty,
+                    'formality': formality,
+                    'politeness': politeness,
+                }
+            },
+            'gate_weights': gate_weights,
+        }
+
+def load_emotion_dataset(jsonl_path: str):
+    recs = []
+    with open(jsonl_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            if line.strip():
+                try:
+                    recs.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+    return recs
+
+def preprocess(records, sbert_model):
+    import spacy
+    nlp = spacy.load("en_core_web_sm")
+    processed = []
+    for idx, r in enumerate(records):
+        text = r.get('text', '')
+        emb = sbert_model.encode(text, convert_to_tensor=False)
+        doc = nlp(text)
+        pos = np.zeros((128, 10), dtype=np.float32)
+        syn = np.zeros((128, 3), dtype=np.float32)
+        pm = {'NOUN':0,'VERB':1,'ADJ':2,'ADV':3,'PRON':4,'DET':5,'ADP':6,'CONJ':7,'NUM':8,'PUNCT':9}
+        for i, tok in enumerate(list(doc)[:128]):
+            if tok.pos_ in pm: pos[i, pm[tok.pos_]] = 1.0
+            syn[i,0] = min(abs(tok.head.i - tok.i),10)/10.0
+            syn[i,1] = 1.0 if tok.is_punct else 0.0
+            syn[i,2] = 1.0 if tok.is_stop else 0.0
+        p = np.zeros(8, dtype=np.float32)
+        prim = r.get('plutchik',{}).get('primary','joy')
+        inten = float(r.get('plutchik',{}).get('intensity',0.5))
+        if prim in PLUTCHIK_LABELS: p[PLUTCHIK_LABELS.index(prim)] = inten
+        sec = r.get('plutchik',{}).get('secondary')
+        sec_map = {'optimism':'anticipation','admiration':'trust','anxiety':'fear','hope':'anticipation','excitement':'joy','contentment':'joy','grief':'sadness','despair':'sadness','contempt':'disgust','outrage':'anger','fury':'anger','resentment':'anger'}
+        if sec in sec_map: p[PLUTCHIK_LABELS.index(sec_map[sec])] += 0.25
+        p = p / (np.sum(p)+1e-6)
+        mapped = INTENT_MAPPING.get(r.get('intent','inform'),'inform')
+        intent_idx = COMPASS_INTENTS.index(mapped)
+        intent_oh = np.zeros(8, dtype=np.float32); intent_oh[intent_idx]=1.0
+        style = r.get('style',{})
+        beta = float(style.get('beta',0.5)); phi=float(style.get('phi',0.5))
+        urgency = inten if inten>0.6 else inten*0.7; certainty = phi if phi>0 else 0.5
+        processed.append({
+            'sbert_embedding': emb.astype(np.float32),
+            'pos_tags': pos,
+            'syntax_features': syn,
+            'plutchik_probs': p,
+            'intent_label': intent_oh,
+            'urgency': urgency,
+            'certainty': certainty,
+            'formality': beta,
+            'politeness': phi,
+        })
+    return processed
+
+@jit
+def train_step(state, batch):
+    def loss_fn(p):
+        out = state.apply_fn({'params': p}, batch['sbert_embedding'], batch['pos_tags'], batch['syntax_features'], training=True)
+        el = optax.softmax_cross_entropy(out['emotions']['plutchik'], batch['plutchik_probs']).mean()
+        il = optax.softmax_cross_entropy(out['intent']['primary_intent'], batch['intent_label']).mean()
+        m = out['intent']['modifiers']
+        ml = ((m['urgency']-batch['urgency'])**2 + (m['certainty']-batch['certainty'])**2 + (m['formality']-batch['formality'])**2 + (m['politeness']-batch['politeness'])**2).mean()
+        gw = out['gate_weights']; div = -jnp.mean(jnp.sum(gw * jnp.log(gw + 1e-8), axis=-1))
+        total = 1.0*el + 1.0*il + 0.5*ml + 0.02*div
+        return total, {'loss': total, 'emotion': el, 'intent': il, 'modifiers': ml, 'diversity': -div}
+    (loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
+    return state.apply_gradients(grads=grads), metrics
+
+def batches(data, bs=128, shuffle=True):
+    idx = np.arange(len(data));
+    if shuffle: np.random.shuffle(idx)
+    for s in range(0, len(idx), bs):
+        sel = idx[s:s+bs]; d=[data[i] for i in sel]
+        yield {
+            'sbert_embedding': jnp.array([x['sbert_embedding'] for x in d]),
+            'pos_tags': jnp.array([x['pos_tags'] for x in d]),
+            'syntax_features': jnp.array([x['syntax_features'] for x in d]),
+            'plutchik_probs': jnp.array([x['plutchik_probs'] for x in d]),
+            'intent_label': jnp.array([x['intent_label'] for x in d]),
+            'urgency': jnp.array([x['urgency'] for x in d]).reshape(-1,1),
+            'certainty': jnp.array([x['certainty'] for x in d]).reshape(-1,1),
+            'formality': jnp.array([x['formality'] for x in d]).reshape(-1,1),
+            'politeness': jnp.array([x['politeness'] for x in d]).reshape(-1,1),
+        }
+
+def main():
+    parser = argparse.ArgumentParser(description='TPU v4-32 training for Emotion+Intent (SBERT-based)')
+    parser.add_argument('--data', required=True, help='Path to emotions.jsonl')
+    parser.add_argument('--epochs', type=int, default=10)
+    parser.add_argument('--batch-size', type=int, default=128)
+    parser.add_argument('--lr', type=float, default=3e-5)
+    parser.add_argument('--model', default='sentence-transformers/all-MiniLM-L6-v2')
+    args = parser.parse_args()
+
+    print(f"Devices: {jax.devices()}")
+    if SentenceTransformer is None:
+        raise RuntimeError('sentence-transformers not installed')
+    sbert_model = SentenceTransformer(args.model)
+
+    print(f"Loading dataset: {args.data}")
+    records = load_emotion_dataset(args.data)
+    print(f"Records: {len(records)}")
+
+    # Split 80/10/10
+    from sklearn.model_selection import train_test_split
+    train_records, temp_records = train_test_split(records, test_size=0.2, random_state=42)
+    val_records, test_records = train_test_split(temp_records, test_size=0.5, random_state=42)
+
+    print("Preprocessing...")
+    train_processed = preprocess(train_records, sbert_model)
+    val_processed   = preprocess(val_records, sbert_model)
+
+    rng = random.PRNGKey(42)
+    model = ConsciousnessAwareSNN()
+    params = model.init({'params': rng}, jnp.ones((2,384)), jnp.ones((2,128,10)), jnp.ones((2,128,3)), training=False)['params']
+
+    steps = (max(1, len(train_processed)//args.batch_size))*args.epochs
+    schedule = optax.warmup_cosine_decay_schedule(0.0, args.lr, max(10, steps//20), steps, args.lr*0.3)
+    tx = optax.chain(optax.clip_by_global_norm(1.0), optax.adamw(learning_rate=schedule, weight_decay=0.01))
+    state = train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
+
+    print("Starting training...")
+    t0 = time.time()
+    for epoch in range(args.epochs):
+        metrics_buf = []
+        for step, batch in enumerate(batches(train_processed, bs=args.batch_size, shuffle=True)):
+            state, metrics = train_step(state, batch)
+            metrics_buf.append(metrics)
+            if (step+1) % 10 == 0:
+                avg = jnp.mean(jnp.array([m['loss'] for m in metrics_buf[-10:]]))
+                print(f"  epoch {epoch+1} step {step+1}: loss={float(avg):.4f}")
+        avg_epoch = jnp.mean(jnp.array([m['loss'] for m in metrics_buf]))
+        print(f"Epoch {epoch+1}: train_loss={float(avg_epoch):.4f}")
+    dt = time.time()-t0
+    print(f"Done. Elapsed {dt/60:.2f} min")
+
+if __name__ == '__main__':
+    main()

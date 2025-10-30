@@ -1,0 +1,271 @@
+\documentclass[12pt]{article}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{microtype}
+\usepackage{amsmath, amssymb, graphicx, natbib}
+
+\title{Bio-MoE: A Brain-Inspired Mixture-of-Experts Framework with Neuroplasticity for Continual Learning}
+\author{Nicolas Cloutier (COGNITIV AURA Project)}
+\date{October 2025}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We present Bio-MoE, a modular neural expert system inspired by recent advances in mixture-of-experts (MoE) architectures and biological learning principles. Bio-MoE integrates neuro-plasticity mechanisms -- including Hebbian learning, homeostatic regulation, synaptic consolidation, and reward modulation -- to enable dynamic expert growth, specialization, and continual adaptation to new tasks. We analyze the theoretical and practical implications for scalable, robust, and biologically plausible lifelong learning.
+\end{abstract}
+
+\section{Introduction}
+Recent advances in Mixture-of-Experts (MoE) architectures have enabled efficient scaling of deep models by activating only the most relevant subnets (experts) for each input~\citep{mu2025survey,li2024scaling,oldfield2024factorization}. However, traditional MoE frameworks suffer from rigid topology, lack of continual plasticity, and catastrophic forgetfulness when adapting to new tasks. Inspired by brain organization and plasticity, Bio-MoE introduces a biologically plausible meta-learning layer that dynamically modulates expert routing, grows new experts, and protects important connections, drawing on mechanisms observed in neural systems~\citep{kaiser2020decolle,liu2024neuroplastic,shi2025hybrid}.
+
+\section{Bio-MoE Architecture}
+Bio-MoE organizes experts into ``zones'' analogous to brain regions (e.g., hippocampus, amygdala, thalamus), each with specialized functional roles. Inputs are routed via a soft gating network, modulated by bio-inspired signals (e.g., spiking attention, phasor resonance) and plastic connection strengths. The architecture supports:
+\begin{itemize}
+    \item \textbf{Dynamic expert growth:} New experts are instantiated and specialized as needed
+    \item \textbf{Hierarchical zone-based organization:} Inter-zonal communication emulates cortical--thalamic loops
+    \item \textbf{Continual adaptation:} Expert connections and routing weights evolve through online learning
+\end{itemize}
+
+\begin{figure}[h]
+    \centering
+    % Safe include: shows a framed placeholder if the PNG is missing
+    \IfFileExists{bio_moe_architecture.png}{%
+      \includegraphics[width=0.8\textwidth]{bio_moe_architecture.png}%
+    }{%
+      \fbox{\parbox[c][0.25\textheight][c]{0.8\textwidth}{\centering Missing figure: \texttt{bio\string_moe\string_architecture.png}}}%
+    }
+    \caption{Bio-MoE Architecture with neuroplastic gating and dynamic expert growth}
+\end{figure}
+
+% Mermaid source for the Bio-MoE architecture (render externally to bio_moe_architecture.png)
+\noindent\textbf{Mermaid Diagram Source (Bio-MoE Architecture).} Render this Mermaid code to PNG as
+\texttt{bio\_moe\_architecture.png} to replace the placeholder above.
+\begin{verbatim}
+flowchart TD
+  U[User/Input] --> Tkn[Tokenizer (SPM)]
+  Tkn --> TE[TokenEmbedding]
+  TE -->|query embedding| STA[SelfTeachingAdapter]
+
+  subgraph Adapter[Self-Teaching Adapter]
+    direction LR
+    STA --> SRC[SpikingRetrievalCore]
+    STA --> SLC[SpikingLanguageCore]
+    SRC -->|context vector| SLC
+    SLC --> TD[TokenDecoder]
+  end
+
+  subgraph LMoE[Enhanced Spiking Retrieval Core (Liquid-MoE)]
+    direction TB
+    Q[(Query Embedding)]
+    Q --> PB[PhasorBankJAX]
+    Q --> SA[SpikingAttentionJAX]
+    Q --> GFeat[Simple Stats (mean/std)]
+
+    subgraph Gate[Hierarchical Gating]
+      direction TB
+      GateIn[Gate Inputs] --> PredHead[Predictive Head]
+      PredHead --> GL[Gate Logits]
+      GL -->|softmax/temperature| GW[Gate Weights]
+      MB[MeritBoard] --> GL
+      TR[Thalamic Router] --> GL
+      PM[Personality Modulator] --> GL
+      IG[Inactive/Freeze Masks] --> GL
+      TOPK[Top-k routing] --> Mix
+      GW --> TOPK
+    end
+
+    subgraph Experts[Expert Pool]
+      direction LR
+      E0[MLPExpert]
+      E1[Conv1DExpert]
+      E2[RationalExpert]
+      E3[CodeExpert]
+      E4[SelfImproveExpert]
+    end
+
+    Q --> PB
+    Q --> SA
+    PB --> GateIn
+    SA --> GateIn
+    GFeat --> GateIn
+
+    Q --> E0
+    Q --> E1
+    Q --> E2
+    Q --> E3
+    Q --> E4
+
+    E0 --> Mix[Weighted Mixture]
+    E1 --> Mix
+    E2 --> Mix
+    E3 --> Mix
+    E4 --> Mix
+    Mix --> Ctx[(Context Vector)]
+  end
+
+  TE --> Q
+  LMoE -->|context| SRC
+  TD --> OUT[Output]
+
+  CKPT[(Expert Checkpoints)] <--> Experts
+\end{verbatim}
+
+\section{Neuroplasticity Mechanisms}
+Bio-MoE integrates several neurobiological learning principles into deep learning (see Table~\ref{tab:mechanisms}):
+\begin{itemize}
+    \item \textbf{Hebbian Learning}~\citep{hebb1949organization,hebbian_guide}: Strengthens connections between co-active experts (``neurons that fire together, wire together'').
+    \item \textbf{Homeostatic Plasticity}~\citep{turrigiano2012homeostatic,lu2023synaptic}: Balances activity levels across experts to prevent saturation or dormancy.
+    \item  \textbf{Spike-Timing-Dependent Plasticity (STDP)}~\citep{sjostrom2010stdp,debanne2023stdp}: Adjusts connection strengths based on the temporal order of expert activations.
+    \item \textbf{Synaptic Consolidation}~\citep{clopath2011synaptic,bhasin2024synaptic,lindsey2024consolidation}: Protects important expert connections from pruning, enabling long-term memory.
+    \item \textbf{Reward-Modulated Plasticity}~\citep{legenstein2008reward,sorn2015reward}: Strengthens connections that consistently contribute to high task rewards.
+\end{itemize}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{|l|l|l|}
+\hline
+Mechanism & Biological Analog & Role in Bio-MoE \\
+\hline
+Hebbian Learning & Synaptic potentiation & Specializes expert communication \\
+Homeostasis & Synaptic scaling & Balances expert activity \\
+STDP & Spike-timing dependency & Temporal specialism \\
+Consolidation & LTM via replay/pruning & Protects knowledge \\
+Reward-modulation & Dopamine/acetylcholine & Biases routing for outcomes \\
+\hline
+\end{tabular}
+\caption{Neuro-plastic mechanisms integrated into Bio-MoE.}
+\label{tab:mechanisms}
+\end{table}
+
+\section{Dynamic Expert Growth and Pruning}
+Bio-MoE employs a neuro-genesis-inspired strategy for scalable learning:
+\begin{itemize}
+    \item Experts are added through cloning/distillation when routing entropy is high or new tasks emerge
+    \item Underused connections are pruned, except those marked as consolidated
+    \item Homeostatic regulation prevents catastrophic forgetting by balancing activation among experts
+\end{itemize}
+
+\section{Reward-Modulated Meta-Learning}
+Plasticity updates are modulated by task reward signals. Reward-modulated Hebbian learning and STDP mechanisms selectively reinforce collaborations leading to successful outcomes~\citep{fremaux2010functional,legenstein2008reward,sorn2015reward}. Meta-plasticity tunes the rates of learning mechanisms in response to ongoing performance.
+
+\section{Experimental Results}
+Studies show that neuroplastic MoE architectures outperform static MoE (in continuous, multi-modal, and reinforcement settings) by maintaining adaptability and avoiding forgetting~\citep{willie2024rlj,liu2024neuroplastic,han2023dsd}. Bio-MoE's demonstration on MNIST validates dynamic expert growth and robust accuracy.
+
+\section{Discussion and Implications}
+Bio-MoE points to next-generation neuromorphic AI architectures that:
+\begin{itemize}
+    \item Match biological learning in plasticity and stability
+    \item Support scalable lifelong continuous learning
+    \item Integrate modular specialization, temporal learning, and reward-driven adaptation
+\end{itemize}
+Open challenges remain in scaling reward assignment, efficient gating, and supporting multi-zone learning at LLM scale.
+
+\section{Conclusion}
+Bio-MoE integrates biologically grounded plasticity mechanisms with scalable Mixture-of-Experts architectures to achieve robust, continuous learning. Emulating the brain's adaptability, Bio-MoE systems offer pathways toward human-like AI in dynamic settings.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{20}
+
+\bibitem[Mu \& Lin(2025)]{mu2025survey}
+S.~Mu and S.~Lin.
+\newblock A Comprehensive Survey of Mixture-of-Experts: Algorithms, Theory, and Applications.
+\newblock \emph{arXiv:2503.07137}, 2025.
+
+\bibitem[Li et~al.(2024)]{li2024scaling}
+K.~Li et~al.
+\newblock Mixtures of Experts for Scaling up Neural Networks.
+\newblock \emph{ACM}, 2024.
+
+\bibitem[Oldfield et~al.(2024)]{oldfield2024factorization}
+J.~Oldfield et~al.
+\newblock Scalable Expert Specialization through Factorization.
+\newblock \emph{NeurIPS}, 2024.
+
+\bibitem[Kaiser et~al.(2020)]{kaiser2020decolle}
+J.~Kaiser et~al.
+\newblock Synaptic Plasticity Dynamics for Deep Continuous Local Learning (DECOLLE).
+\newblock \emph{Frontiers in Neuroscience}, 2020.
+
+\bibitem[Liu et~al.(2024)]{liu2024neuroplastic}
+J.~Liu et~al.
+\newblock Neuroplastic Expansion in Deep Reinforcement Learning.
+\newblock \emph{arXiv:2410.07994}, 2024.
+
+\bibitem[Shi et~al.(2025)]{shi2025hybrid}
+Q.~Shi et~al.
+\newblock Hybrid neural networks for continual learning inspired by biological consolidation.
+\newblock \emph{Nature Communications}, 2025.
+
+\bibitem[Hebb(1949)]{hebb1949organization}
+D.~O. Hebb.
+\newblock \emph{The Organization of Behavior}.
+\newblock 1949.
+
+\bibitem[Turrigiano(2012)]{turrigiano2012homeostatic}
+G.~Turrigiano.
+\newblock Homeostatic Synaptic Plasticity: Local and Global Mechanisms.
+\newblock \emph{Neuron}, 2012.
+
+\bibitem[Sj{\"o}str{\"o}m \& Gerstner(2010)]{sjostrom2010stdp}
+J.~Sj{\"o}str{\"o}m and W.~Gerstner.
+\newblock Spike-timing dependent plasticity.
+\newblock \emph{Scholarpedia}, 2010.
+
+\bibitem[Clopath et~al.(2011)]{clopath2011synaptic}
+C.~Clopath et~al.
+\newblock Synaptic consolidation: an approach to long-term learning.
+\newblock \emph{Frontiers in Computational Neuroscience}, 2011.
+
+\bibitem[Bhasin et~al.(2024)]{bhasin2024synaptic}
+B.~J. Bhasin et~al.
+\newblock Synaptic weight dynamics underlying memory consolidation.
+\newblock \emph{PNAS}, 2024.
+
+\bibitem[Lindsey et~al.(2024)]{lindsey2024consolidation}
+J.~Lindsey et~al.
+\newblock Selective consolidation via recall gating.
+\newblock \emph{eLife}, 2024.
+
+\bibitem[Legenstein et~al.(2008)]{legenstein2008reward}
+R.~Legenstein et~al.
+\newblock A Learning Theory for Reward-Modulated Spike-Timing Dependent Plasticity.
+\newblock \emph{PLoS Computational Biology}, 2008.
+
+\bibitem[Fr{\'e}maux et~al.(2010)]{fremaux2010functional}
+N.~Fr{\'e}maux et~al.
+\newblock Functional Requirements for Reward-Modulated STDP.
+\newblock 2010.
+
+\bibitem[Aswolinskiy et~al.(2015)]{sorn2015reward}
+W.~Aswolinskiy et~al.
+\newblock RM-SORN: a reward-modulated self-organizing recurrent network.
+\newblock \emph{Frontiers in Computational Neuroscience}, 2015.
+
+\bibitem[Willi et~al.(2024)]{willie2024rlj}
+T.~Willi et~al.
+\newblock Mixture of Experts in a Mixture of RL settings.
+\newblock \emph{RL Journal}, 2024.
+
+\bibitem[Han et~al.(2023)]{han2023dsd}
+B.~Han et~al.
+\newblock Dynamic Structure Development of Spiking Neural Networks for Continual Learning.
+\newblock \emph{IJCAI}, 2023.
+
+\bibitem[The Decision Lab(2021)]{hebbian_guide}
+The Decision Lab.
+\newblock Hebbian Learning, 2021.
+
+\bibitem[Lu et~al.(2023)]{lu2023synaptic}
+H.~Lu et~al.
+\newblock The interplay between homeostatic synaptic scaling and structural plasticity.
+\newblock \emph{bioRxiv}, 2023.
+
+\bibitem[Debanne et~al.(2023)]{debanne2023stdp}
+D.~Debanne et~al.
+\newblock Spike-timing dependent plasticity: state of the art.
+\newblock 2023.
+
+\end{thebibliography}
+
+\end{document}

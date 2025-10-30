@@ -72,7 +72,7 @@ class EnhancedSpikingRetrievalCore(nn.Module):
         else:
             self.group_index = [0 for _ in range(self.num_experts)]
     
-    def __call__(self, query_embedding: jnp.ndarray, active_experts: int = None, freeze_mask: jnp.ndarray = None, merit_bias: jnp.ndarray = None, temperature: jnp.ndarray = None, inactive_mask: jnp.ndarray = None, thalamic_bias: jnp.ndarray = None) -> jnp.ndarray:
+    def __call__(self, query_embedding: jnp.ndarray, active_experts: int = None, freeze_mask: jnp.ndarray = None, merit_bias: jnp.ndarray = None, temperature: jnp.ndarray = None, inactive_mask: jnp.ndarray = None, thalamic_bias: jnp.ndarray = None, prosody_features: dict | None = None, emotions: jnp.ndarray | None = None) -> jnp.ndarray:
         """
         Retrieve context with temporal feature enhancement.
         
@@ -91,7 +91,24 @@ class EnhancedSpikingRetrievalCore(nn.Module):
         vocab_size = int(query_embedding.shape[-1])
         attention_gains = jax.vmap(self.spiking_attention, in_axes=(0, None))(topk_idx.astype(jnp.int32), vocab_size)
         if self.use_bio_gating:
-            gate_inputs = jnp.stack([jnp.mean(temporal_features, axis=-1), jnp.mean(attention_gains, axis=-1)], axis=-1)
+            base_inputs = [jnp.mean(temporal_features, axis=-1), jnp.mean(attention_gains, axis=-1)]
+            # Ensure 2D features
+            # Build fixed-size feature vector: [mean_temporal, mean_attention, mean_pitch, mean_energy, emotions(8)]
+            mt, ma = base_inputs
+            mt = mt[:, None] if mt.ndim == 1 else mt
+            ma = ma[:, None] if ma.ndim == 1 else ma
+            if prosody_features is not None and 'pitch' in prosody_features:
+                mp = jnp.mean(prosody_features['pitch'], axis=-1)
+                mp = mp[:, None] if mp.ndim == 1 else mp
+            else:
+                mp = jnp.zeros_like(mt)
+            if prosody_features is not None and 'energy' in prosody_features:
+                me = jnp.mean(prosody_features['energy'], axis=-1)
+                me = me[:, None] if me.ndim == 1 else me
+            else:
+                me = jnp.zeros_like(ma)
+            emo = emotions if emotions is not None else jnp.zeros((mt.shape[0], 8), dtype=mt.dtype)
+            gate_inputs = jnp.concatenate([mt, ma, mp, me, emo], axis=-1)  # [batch, 12]
         else:
             q_mean = jnp.mean(query_embedding, axis=-1)
             q_std = jnp.std(query_embedding, axis=-1)
@@ -148,7 +165,14 @@ class EnhancedSpikingRetrievalCore(nn.Module):
             expert_stack = jnp.where(fm, jax.lax.stop_gradient(expert_stack), expert_stack)
         elif self.freeze_experts:
             expert_stack = jax.lax.stop_gradient(expert_stack)
-        context_vector = jnp.einsum('bn,bnh->bh', gate_weights, expert_stack)  # [batch, hidden_dim]
+        # Combine expert outputs with gate weights; ensure correct [batch, num_experts, hidden]
+        if expert_stack.shape[0] == gate_weights.shape[0]:
+            stack_bnh = expert_stack
+        elif expert_stack.shape[1] == gate_weights.shape[0] and expert_stack.shape[0] == gate_weights.shape[1]:
+            stack_bnh = jnp.transpose(expert_stack, (1, 0, 2))
+        else:
+            stack_bnh = expert_stack  # fallback
+        context_vector = jnp.sum(gate_weights[:, :, None] * stack_bnh, axis=1)
         return context_vector
 
     def _normalize_in_dim(self, x: jnp.ndarray) -> jnp.ndarray:
@@ -162,7 +186,7 @@ class EnhancedSpikingRetrievalCore(nn.Module):
             pad = self.embed_dim - d
             return jnp.pad(x, ((0, 0), (0, pad)), mode='constant')
 
-    def compute_gate_weights(self, query_embedding: jnp.ndarray, active_experts: int = None, merit_bias: jnp.ndarray = None, temperature: jnp.ndarray = None, inactive_mask: jnp.ndarray = None, thalamic_bias: jnp.ndarray = None) -> jnp.ndarray:
+    def compute_gate_weights(self, query_embedding: jnp.ndarray, active_experts: int = None, merit_bias: jnp.ndarray = None, temperature: jnp.ndarray = None, inactive_mask: jnp.ndarray = None, thalamic_bias: jnp.ndarray = None, prosody_features: dict | None = None, emotions: jnp.ndarray | None = None) -> jnp.ndarray:
         """Compute routing weights without producing a context vector."""
         query_mean = jnp.mean(query_embedding, axis=-1)
         temporal_features = jax.vmap(self.phasor_bank)(query_mean)
@@ -171,7 +195,22 @@ class EnhancedSpikingRetrievalCore(nn.Module):
         vocab_size = int(query_embedding.shape[-1])
         attention_gains = jax.vmap(self.spiking_attention, in_axes=(0, None))(topk_idx.astype(jnp.int32), vocab_size)
         if self.use_bio_gating:
-            gate_inputs = jnp.stack([jnp.mean(temporal_features, axis=-1), jnp.mean(attention_gains, axis=-1)], axis=-1)
+            base_inputs = [jnp.mean(temporal_features, axis=-1), jnp.mean(attention_gains, axis=-1)]
+            mt, ma = base_inputs
+            mt = mt[:, None] if mt.ndim == 1 else mt
+            ma = ma[:, None] if ma.ndim == 1 else ma
+            if prosody_features is not None and 'pitch' in prosody_features:
+                mp = jnp.mean(prosody_features['pitch'], axis=-1)
+                mp = mp[:, None] if mp.ndim == 1 else mp
+            else:
+                mp = jnp.zeros_like(mt)
+            if prosody_features is not None and 'energy' in prosody_features:
+                me = jnp.mean(prosody_features['energy'], axis=-1)
+                me = me[:, None] if me.ndim == 1 else me
+            else:
+                me = jnp.zeros_like(ma)
+            emo = emotions if emotions is not None else jnp.zeros((mt.shape[0], 8), dtype=mt.dtype)
+            gate_inputs = jnp.concatenate([mt, ma, mp, me, emo], axis=-1)
         else:
             q_mean = jnp.mean(query_embedding, axis=-1)
             q_std = jnp.std(query_embedding, axis=-1)

@@ -10,6 +10,7 @@ from jax import random, jit
 from flax import linen as nn
 from flax.training import train_state
 import optax
+from jax import distributed as jdist
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -157,9 +158,19 @@ def main():
     parser.add_argument('--batch-size', type=int, default=128)
     parser.add_argument('--lr', type=float, default=3e-5)
     parser.add_argument('--model', default='sentence-transformers/all-MiniLM-L6-v2')
+    # Multi-host TPU flags (or via env: COORDINATOR_ADDRESS, NUM_PROCESSES, PROCESS_ID)
+    parser.add_argument('--coordinator-address', default=os.environ.get('COORDINATOR_ADDRESS', 'localhost:12355'))
+    parser.add_argument('--num-processes', type=int, default=int(os.environ.get('NUM_PROCESSES', '1')))
+    parser.add_argument('--process-id', type=int, default=int(os.environ.get('PROCESS_ID', '0')))
     args = parser.parse_args()
 
-    print(f"Devices: {jax.devices()}")
+    # Initialize JAX distributed for TPU pods (run on ALL hosts with unique process_id)
+    if args.num_processes > 1:
+        print(f"Initializing JAX distributed: coord={args.coordinator_address}, num_processes={args.num_processes}, process_id={args.process_id}")
+        jdist.initialize(coordinator_address=args.coordinator_address,
+                         num_processes=args.num_processes,
+                         process_id=args.process_id)
+    print(f"Devices (pid {args.process_id}/{args.num_processes}): {jax.devices()}")
     if SentenceTransformer is None:
         raise RuntimeError('sentence-transformers not installed')
     sbert_model = SentenceTransformer(args.model)
@@ -193,13 +204,15 @@ def main():
         for step, batch in enumerate(batches(train_processed, bs=args.batch_size, shuffle=True)):
             state, metrics = train_step(state, batch)
             metrics_buf.append(metrics)
-            if (step+1) % 10 == 0:
+            if (step+1) % 10 == 0 and (args.process_id == 0):
                 avg = jnp.mean(jnp.array([m['loss'] for m in metrics_buf[-10:]]))
                 print(f"  epoch {epoch+1} step {step+1}: loss={float(avg):.4f}")
-        avg_epoch = jnp.mean(jnp.array([m['loss'] for m in metrics_buf]))
-        print(f"Epoch {epoch+1}: train_loss={float(avg_epoch):.4f}")
+        if args.process_id == 0:
+            avg_epoch = jnp.mean(jnp.array([m['loss'] for m in metrics_buf]))
+            print(f"Epoch {epoch+1}: train_loss={float(avg_epoch):.4f}")
     dt = time.time()-t0
-    print(f"Done. Elapsed {dt/60:.2f} min")
+    if args.process_id == 0:
+        print(f"Done. Elapsed {dt/60:.2f} min")
 
 if __name__ == '__main__':
     main()

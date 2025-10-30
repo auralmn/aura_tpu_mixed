@@ -1,0 +1,15 @@
+{
+  "vocab_size": 32000,
+  "model_type": "unigram",
+  "character_coverage": 0.9995,
+  "special_tokens": true,
+  "txt_dirs": [
+    "data/txt",
+    "data/kb"
+  ],
+  "json_dirs": [
+    "data/json",
+    "data/pretrain"
+  ],
+  "timestamp": "1761748592.920203"
+}

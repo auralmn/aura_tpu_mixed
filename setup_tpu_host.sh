@@ -41,8 +41,9 @@ if [[ ! -f "${REPO_ROOT}/train_tpu_v4.py" ]]; then
   exit 1
 fi
 
-# 1) Python deps (UV per policy)
-uv pip install -U "jax[tpu]" jaxlib flax optax sentence-transformers spacy scikit-learn --quiet
+# 1) Python deps (UV per policy) — pin compatible versions and ensure NumPy ≥ 2.0
+uv pip install --system -U numpy>=2.0.0 --quiet
+uv pip install --system -U jax==0.4.31 jaxlib==0.4.31 flax optax sentence-transformers spacy scikit-learn --quiet
 
 # 2) SpaCy model (silent ok)
 python -m spacy download en_core_web_sm >/dev/null 2>&1 || true

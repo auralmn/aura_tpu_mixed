@@ -481,7 +481,12 @@ def run_torch_xla(args):
         total=0.0; cnt=0
         optim.zero_grad()
         k=0
+        first_step = True
+        print(f"[XLA] Epoch {epoch+1} start. First step may compile (1–3 min)...", flush=True)
         for batch in train_loader:
+            if first_step:
+                print("[XLA] Compiling first step...", flush=True)
+                first_step = False
             batch = {k:(v.to(device)) for k,v in batch.items() if isinstance(v, torch.Tensor)}
             outputs = sbert(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'])
             hidden = outputs.last_hidden_state
@@ -501,6 +506,8 @@ def run_torch_xla(args):
             if k % int(os.environ.get('GRAD_ACCUM_STEPS','1')) == 0:
                 xm.optimizer_step(optim, barrier=True)
                 xm.mark_step()
+                if k == 1:
+                    print("[XLA] First step compiled and executed.", flush=True)
                 optim.zero_grad()
             total += loss.item(); cnt += 1
         if cnt>0: print(f"Epoch {epoch+1}: train_loss={total/cnt:.4f}")

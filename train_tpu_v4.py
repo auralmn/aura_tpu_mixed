@@ -17,6 +17,7 @@ from flax import serialization
 import optax
 from jax import distributed as jdist
 from pathlib import Path
+from typing import Optional
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -227,7 +228,9 @@ def preprocess(records, sbert_model, sp_model_path: str | None = None):
     return processed
 
 @jit
-def train_step(state, batch):
+def train_step(state, batch, num_classes_emotion: int = 8, num_classes_intent: int = 8, label_smoothing: float = 0.0, diversity_coef: float = 0.02):
+    def smooth_labels(y, n_classes):
+        return (1.0 - label_smoothing) * y + label_smoothing / n_classes
     def loss_fn(p):
         out = state.apply_fn(
             {'params': p},
@@ -240,12 +243,15 @@ def train_step(state, batch):
             batch['sp_sublen'],
             training=True
         )
-        el = optax.softmax_cross_entropy(out['emotions']['plutchik'], batch['plutchik_probs']).mean()
-        il = optax.softmax_cross_entropy(out['intent']['primary_intent'], batch['intent_label']).mean()
+        # Label smoothing
+        emo_targets = smooth_labels(batch['plutchik_probs'], num_classes_emotion)
+        intent_targets = smooth_labels(batch['intent_label'], num_classes_intent)
+        el = optax.softmax_cross_entropy(out['emotions']['plutchik'], emo_targets).mean()
+        il = optax.softmax_cross_entropy(out['intent']['primary_intent'], intent_targets).mean()
         m = out['intent']['modifiers']
         ml = ((m['urgency']-batch['urgency'])**2 + (m['certainty']-batch['certainty'])**2 + (m['formality']-batch['formality'])**2 + (m['politeness']-batch['politeness'])**2).mean()
         gw = out['gate_weights']; div = -jnp.mean(jnp.sum(gw * jnp.log(gw + 1e-8), axis=-1))
-        total = 1.0*el + 1.0*il + 0.5*ml + 0.02*div
+        total = 1.0*el + 1.0*il + 0.5*ml + diversity_coef*div
         return total, {'loss': total, 'emotion': el, 'intent': il, 'modifiers': ml, 'diversity': -div}
     (loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
     return state.apply_gradients(grads=grads), metrics
@@ -285,6 +291,10 @@ def main():
     parser.add_argument('--process-id', type=int, default=int(os.environ.get('PROCESS_ID', '0')))
     parser.add_argument('--ckpt-dir', default=os.environ.get('CKPT_DIR', ''), help='Checkpoint directory (optional)')
     parser.add_argument('--ckpt-every', type=int, default=0, help='Save checkpoint every N epochs (0=disable)')
+    parser.add_argument('--num-experts', type=int, default=int(os.environ.get('NUM_EXPERTS', '8')))
+    parser.add_argument('--diversity-coef', type=float, default=float(os.environ.get('DIVERSITY_COEF', '0.05')))
+    parser.add_argument('--label-smoothing', type=float, default=float(os.environ.get('LABEL_SMOOTHING', '0.05')))
+    parser.add_argument('--final-lr', type=float, default=float(os.environ.get('FINAL_LR', '1e-4')))
     args = parser.parse_args()
 
     # Initialize JAX distributed for TPU pods (run on ALL hosts with unique process_id)
@@ -313,7 +323,7 @@ def main():
     val_processed   = preprocess(val_records, sbert_model, sp_model_path=sp_path)
 
     rng = random.PRNGKey(42)
-    model = ConsciousnessAwareSNN()
+    model = ConsciousnessAwareSNN(num_experts=args.num_experts)
     params = model.init(
         {'params': rng},
         jnp.ones((2,384)),
@@ -327,7 +337,7 @@ def main():
     )['params']
 
     steps = (max(1, len(train_processed)//args.batch_size))*args.epochs
-    schedule = optax.warmup_cosine_decay_schedule(0.0, args.lr, max(10, steps//20), steps, args.lr*0.3)
+    schedule = optax.warmup_cosine_decay_schedule(0.0, args.lr, max(10, steps//20), steps, args.final_lr)
     tx = optax.chain(optax.clip_by_global_norm(1.0), optax.adamw(learning_rate=schedule, weight_decay=0.01))
     state = train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
 
@@ -345,19 +355,45 @@ def main():
             f.write(data)
         print(f"Saved checkpoint: {out_path}")
 
+    @jit
+    def eval_step(params, batch):
+        out = model.apply({'params': params},
+                          batch['sbert_embedding'], batch['pos_tags'], batch['syntax_features'],
+                          batch['sp_token_ids'], batch['sp_wb'], batch['sp_punct'], batch['sp_sublen'],
+                          training=False)
+        emo_targets = (1.0 - args.label_smoothing) * batch['plutchik_probs'] + args.label_smoothing / 8
+        intent_targets = (1.0 - args.label_smoothing) * batch['intent_label'] + args.label_smoothing / 8
+        el = optax.softmax_cross_entropy(out['emotions']['plutchik'], emo_targets).mean()
+        il = optax.softmax_cross_entropy(out['intent']['primary_intent'], intent_targets).mean()
+        m = out['intent']['modifiers']
+        ml = ((m['urgency']-batch['urgency'])**2 + (m['certainty']-batch['certainty'])**2 + (m['formality']-batch['formality'])**2 + (m['politeness']-batch['politeness'])**2).mean()
+        gw = out['gate_weights']; div = -jnp.mean(jnp.sum(gw * jnp.log(gw + 1e-8), axis=-1))
+        total = 1.0*el + 1.0*il + 0.5*ml + args.diversity_coef*div
+        return total
+
     print("Starting training...")
     t0 = time.time()
+    best_val = None
     for epoch in range(args.epochs):
         metrics_buf = []
         for step, batch in enumerate(batches(train_processed, bs=args.batch_size, shuffle=True)):
-            state, metrics = train_step(state, batch)
+            state, metrics = train_step(state, batch, label_smoothing=args.label_smoothing, diversity_coef=args.diversity_coef)
             metrics_buf.append(metrics)
             if (step+1) % 10 == 0 and (args.process_id == 0):
                 avg = jnp.mean(jnp.array([m['loss'] for m in metrics_buf[-10:]]))
                 print(f"  epoch {epoch+1} step {step+1}: loss={float(avg):.4f}")
         if args.process_id == 0:
             avg_epoch = jnp.mean(jnp.array([m['loss'] for m in metrics_buf]))
-            print(f"Epoch {epoch+1}: train_loss={float(avg_epoch):.4f}")
+            # Validation
+            val_losses = []
+            for vb in batches(val_processed, bs=args.batch_size, shuffle=False):
+                val_losses.append(eval_step(state.params, vb))
+            val_loss = float(jnp.mean(jnp.array(val_losses))) if val_losses else float(avg_epoch)
+            print(f"Epoch {epoch+1}: train_loss={float(avg_epoch):.4f} val_loss={val_loss:.4f}")
+            if args.ckpt_dir:
+                if best_val is None or val_loss < best_val:
+                    best_val = val_loss
+                    save_checkpoint(epoch + 1, final=False)
         if args.ckpt_dir and args.ckpt_every > 0 and ((epoch + 1) % args.ckpt_every == 0):
             save_checkpoint(epoch + 1, final=False)
     # final checkpoint

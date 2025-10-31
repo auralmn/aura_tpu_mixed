@@ -46,19 +46,30 @@ export PATH="$HOME/.local/bin:$PATH"
 # Set JAX to use TPU platform
 export JAX_PLATFORMS=tpu
 
+# Check if we're in a venv - if so, don't use --user flag
+if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+  PIP_USER_FLAG=""
+  echo "Virtual environment detected: ${VIRTUAL_ENV}"
+else
+  PIP_USER_FLAG="--user"
+  echo "Using user installation"
+fi
+
 # 1) Python deps — pin compatible versions and ensure NumPy ≥ 2.0
 # Use python3.12 -m pip to ensure we're using Python 3.12 (default is 3.10)
-python3.12 -m pip install -U numpy>=2.0.0 --quiet --user
+# Force upgrade NumPy to 2.0+ (required by JAX 0.4.31)
+python3.12 -m pip install --upgrade --force-reinstall 'numpy>=2.0.0' ${PIP_USER_FLAG}
+python3.12 -c "import numpy; assert int(numpy.__version__.split('.')[0]) >= 2, f'NumPy 2.0+ required, got {numpy.__version__}'; print(f'NumPy {numpy.__version__} verified')"
 
 # Install JAX with TPU support (try jax[tpu] first, fallback to jax if it fails)
-if python3.12 -m pip install -U "jax[tpu]==0.4.31" jaxlib==0.4.31 --quiet --user 2>&1; then
+if python3.12 -m pip install -U "jax[tpu]==0.4.31" jaxlib==0.4.31 --quiet ${PIP_USER_FLAG} 2>&1; then
   echo "Installed jax[tpu] successfully"
 else
   echo "jax[tpu] install failed, trying jax without TPU extra (libtpu should be provided by TPU runtime)"
-  python3.12 -m pip install -U jax==0.4.31 jaxlib==0.4.31 --quiet --user
+  python3.12 -m pip install -U jax==0.4.31 jaxlib==0.4.31 --quiet ${PIP_USER_FLAG}
 fi
 
-python3.12 -m pip install -U flax optax sentence-transformers spacy scikit-learn --quiet --user
+python3.12 -m pip install -U flax optax sentence-transformers spacy scikit-learn --quiet ${PIP_USER_FLAG}
 
 # 2) SpaCy model (silent ok)
 python3.12 -m spacy download en_core_web_sm >/dev/null 2>&1 || true

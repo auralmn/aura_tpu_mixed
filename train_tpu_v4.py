@@ -362,8 +362,14 @@ def run_torch_xla(args):
         xm.master_print(f"[XLA] Supported TPU devices: {xm.get_xla_supported_devices('TPU')}")
     except Exception:
         pass
+    print(f"[Init] Loading tokenizer: {args.sbert_model_name}", flush=True)
     tokenizer = AutoTokenizer.from_pretrained(args.sbert_model_name, use_fast=True)
-    sbert = AutoModel.from_pretrained(args.sbert_model_name).to(device)
+    print("[Init] Tokenizer loaded.", flush=True)
+    print(f"[Init] Loading SBERT model: {args.sbert_model_name}", flush=True)
+    sbert = AutoModel.from_pretrained(args.sbert_model_name)
+    print("[Init] SBERT loaded, moving to XLA device...", flush=True)
+    sbert = sbert.to(device)
+    print("[Init] SBERT on XLA device.", flush=True)
     # Enable gradient checkpointing to save memory if supported
     if hasattr(sbert, 'gradient_checkpointing_enable'):
         sbert.gradient_checkpointing_enable()
@@ -425,15 +431,19 @@ def run_torch_xla(args):
             })
             return sample
 
+    print(f"[Init] Loading dataset: {args.data}", flush=True)
     records = load_emotion_dataset(args.data)
+    print(f"[Init] Loaded {len(records)} records.", flush=True)
     from sklearn.model_selection import train_test_split
     train_records, temp_records = train_test_split(records, test_size=0.2, random_state=42)
     val_records, _ = train_test_split(temp_records, test_size=0.5, random_state=42)
+    print(f"[Init] Building DataLoaders: train={len(train_records)}, val={len(val_records)}", flush=True)
     train_loader = tdata.DataLoader(JsonDataset(train_records), batch_size=args.batch_size, shuffle=True, num_workers=0, persistent_workers=False)
     val_loader = tdata.DataLoader(JsonDataset(val_records), batch_size=args.batch_size, shuffle=False, num_workers=0, persistent_workers=False)
     # Wrap with MpDeviceLoader for XLA stability
     train_loader = MpDeviceLoader(train_loader, device)
     val_loader = MpDeviceLoader(val_loader, device)
+    print("[Init] DataLoaders ready.", flush=True)
 
     class TorchSNN(tnn.Module):
         def __init__(self, sp_vocab=32000, sbert_dim=768, num_experts=4):

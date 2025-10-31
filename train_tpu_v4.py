@@ -30,12 +30,14 @@ try:
     import torch.optim as topt
     import torch.utils.data as tdata
     import torch_xla.core.xla_model as xm
+    from torch_xla.distributed.parallel_loader import MpDeviceLoader
 except Exception:
     torch = None
     tnn = None
     topt = None
     tdata = None
     xm = None
+    MpDeviceLoader = None
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -419,6 +421,9 @@ def run_torch_xla(args):
     val_records, _ = train_test_split(temp_records, test_size=0.5, random_state=42)
     train_loader = tdata.DataLoader(JsonDataset(train_records), batch_size=args.batch_size, shuffle=True, num_workers=0, persistent_workers=False)
     val_loader = tdata.DataLoader(JsonDataset(val_records), batch_size=args.batch_size, shuffle=False, num_workers=0, persistent_workers=False)
+    # Wrap with MpDeviceLoader for XLA stability
+    train_loader = MpDeviceLoader(train_loader, device)
+    val_loader = MpDeviceLoader(val_loader, device)
 
     class TorchSNN(tnn.Module):
         def __init__(self, sp_vocab=32000, sbert_dim=768, num_experts=4):
@@ -485,6 +490,7 @@ def run_torch_xla(args):
             k+=1
             if k % int(os.environ.get('GRAD_ACCUM_STEPS','1')) == 0:
                 xm.optimizer_step(optim, barrier=True)
+                xm.mark_step()
                 optim.zero_grad()
             total += loss.item(); cnt += 1
         if cnt>0: print(f"Epoch {epoch+1}: train_loss={total/cnt:.4f}")
@@ -507,6 +513,7 @@ def run_torch_xla(args):
                 div = -(gate * (gate.clamp(min=1e-8)).log()).sum(-1).mean()
                 loss = el + il + 0.5*ml + args.diversity_coef*div
                 vloss += loss.item(); vcnt += 1
+                xm.mark_step()
         if vcnt>0: print(f"Epoch {epoch+1}: val_loss={vloss/vcnt:.4f}")
         if args.ckpt_dir and args.process_id == 0 and (best_val is None or (vcnt>0 and vloss/vcnt < best_val)):
             best_val = vloss/vcnt if vcnt>0 else None

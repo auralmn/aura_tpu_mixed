@@ -263,7 +263,7 @@ def train_step(model, sbert_flax_module, use_flax_sbert, state, batch,
                 input_ids=batch['sbert_input_ids'],
                 attention_mask=batch['sbert_attention_mask'],
                 params=params_all['sbert'],
-                train=True
+                train=False
             )
             hidden = outputs.last_hidden_state  # [B,L,H]
             mask = batch['sbert_attention_mask'].astype(jnp.float32)

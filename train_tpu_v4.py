@@ -22,27 +22,17 @@ import optax
 from jax import distributed as jdist
 from pathlib import Path
 from typing import Optional
-try:
-    from transformers import AutoTokenizer, FlaxAutoModel, AutoModel
-except Exception:
-    AutoTokenizer = None
-    FlaxAutoModel = None
-    AutoModel = None
-try:
-    import torch
-    import torch.nn as tnn
-    import torch.optim as topt
-    import torch.utils.data as tdata
-    import torch_xla as txla
-    import torch_xla.core.xla_model as xm
-    from torch_xla.distributed.parallel_loader import MpDeviceLoader
-except Exception:
-    torch = None
-    tnn = None
-    topt = None
-    tdata = None
-    xm = None
-    MpDeviceLoader = None
+# Defer heavy imports to runtime paths to avoid blocking early output
+AutoTokenizer = None
+FlaxAutoModel = None
+AutoModel = None
+torch = None
+tnn = None
+topt = None
+tdata = None
+txla = None
+xm = None
+MpDeviceLoader = None
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -348,10 +338,18 @@ def batches(data, bs=128, shuffle=True):
         yield batch_dict
 
 def run_torch_xla(args):
-    if torch is None or xm is None or AutoTokenizer is None or AutoModel is None:
-        raise RuntimeError('torch/torch_xla/transformers not installed')
     import os, sys
     print('[Boot] Entered Torch/XLA pipeline', flush=True)
+    # Lazy-import heavy deps here so early prints are visible
+    from transformers import AutoTokenizer, AutoModel
+    import torch
+    import torch.nn as tnn
+    import torch.optim as topt
+    import torch.utils.data as tdata
+    import torch_xla as txla
+    import torch_xla.core.xla_model as xm
+    from torch_xla.distributed.parallel_loader import MpDeviceLoader
+
     try:
         sys.stdout.reconfigure(line_buffering=True); sys.stderr.reconfigure(line_buffering=True)
     except Exception:
@@ -605,11 +603,10 @@ def main():
     sbert_flax = None
     sbert_model = None
     if args.use_flax_sbert:
-        if AutoTokenizer is None or FlaxAutoModel is None:
-            raise RuntimeError('transformers not installed')
-        tokenizer = AutoTokenizer.from_pretrained(args.sbert_model_name, use_fast=True)
+        from transformers import AutoTokenizer as HF_AutoTokenizer, FlaxAutoModel as HF_FlaxAutoModel
+        tokenizer = HF_AutoTokenizer.from_pretrained(args.sbert_model_name, use_fast=True)
         # Use bfloat16 on TPU to reduce memory; from_pt=True enables Torch→Flax conversion
-        sbert_flax = FlaxAutoModel.from_pretrained(args.sbert_model_name, dtype=jnp.bfloat16, from_pt=True)
+        sbert_flax = HF_FlaxAutoModel.from_pretrained(args.sbert_model_name, dtype=jnp.bfloat16, from_pt=True)
     else:
         if SentenceTransformer is None:
             raise RuntimeError('sentence-transformers not installed')

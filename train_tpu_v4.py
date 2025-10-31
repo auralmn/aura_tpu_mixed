@@ -350,8 +350,19 @@ def batches(data, bs=128, shuffle=True):
 def run_torch_xla(args):
     if torch is None or xm is None or AutoTokenizer is None or AutoModel is None:
         raise RuntimeError('torch/torch_xla/transformers not installed')
-    import os
+    import os, sys
+    print('[Boot] Entered Torch/XLA pipeline', flush=True)
+    try:
+        sys.stdout.reconfigure(line_buffering=True); sys.stderr.reconfigure(line_buffering=True)
+    except Exception:
+        pass
     os.environ.setdefault('TOKENIZERS_PARALLELISM', 'false')
+    os.environ.setdefault('TORCH_DISABLE_TORCHDYNAMO', '1')
+    try:
+        import torch._dynamo as dynamo
+        dynamo.disable()
+    except Exception:
+        pass
     try:
         torch.set_num_threads(1)
     except Exception:

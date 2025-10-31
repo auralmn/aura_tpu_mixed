@@ -33,6 +33,7 @@ try:
     import torch.nn as tnn
     import torch.optim as topt
     import torch.utils.data as tdata
+    import torch_xla as txla
     import torch_xla.core.xla_model as xm
     from torch_xla.distributed.parallel_loader import MpDeviceLoader
 except Exception:
@@ -355,7 +356,7 @@ def run_torch_xla(args):
         torch.set_num_threads(1)
     except Exception:
         pass
-    device = xm.xla_device()
+    device = txla.device()
     try:
         xm.master_print(f"[XLA] Using device: {device}")
         xm.master_print(f"[XLA] Supported TPU devices: {xm.get_xla_supported_devices('TPU')}")

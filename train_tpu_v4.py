@@ -19,10 +19,23 @@ from jax import distributed as jdist
 from pathlib import Path
 from typing import Optional
 try:
-    from transformers import AutoTokenizer, FlaxAutoModel
+    from transformers import AutoTokenizer, FlaxAutoModel, AutoModel
 except Exception:
     AutoTokenizer = None
     FlaxAutoModel = None
+    AutoModel = None
+try:
+    import torch
+    import torch.nn as tnn
+    import torch.optim as topt
+    import torch.utils.data as tdata
+    import torch_xla.core.xla_model as xm
+except Exception:
+    torch = None
+    tnn = None
+    topt = None
+    tdata = None
+    xm = None
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -327,6 +340,171 @@ def batches(data, bs=128, shuffle=True):
             batch_dict['sbert_attention_mask'] = None
         yield batch_dict
 
+def run_torch_xla(args):
+    if torch is None or xm is None or AutoTokenizer is None or AutoModel is None:
+        raise RuntimeError('torch/torch_xla/transformers not installed')
+    device = xm.xla_device()
+    tokenizer = AutoTokenizer.from_pretrained(args.sbert_model_name, use_fast=True)
+    sbert = AutoModel.from_pretrained(args.sbert_model_name).to(device)
+    sbert.eval()  # will fine-tune but keep dropout off by default; XLA bf16 via env
+
+    import sentencepiece as spm
+    sp = None
+    if args.sp_model:
+        sp = spm.SentencePieceProcessor(); sp.load(args.sp_model)
+        punct_set = set(['.', '!', '?', ',', ';', ':', '...', '!!', '??'])
+
+    class JsonDataset(tdata.Dataset):
+        def __init__(self, records):
+            self.recs = records
+        def __len__(self): return len(self.recs)
+        def __getitem__(self, idx):
+            r = self.recs[idx]; text = r.get('text','')
+            tok = tokenizer(text, max_length=args.sbert_max_len, truncation=True, padding='max_length', return_tensors='pt')
+            sample = {
+                'input_ids': tok['input_ids'].squeeze(0),
+                'attention_mask': tok['attention_mask'].squeeze(0)
+            }
+            if sp is not None:
+                ids = sp.encode(text, out_type=int)[:128]
+                pieces = sp.encode(text, out_type=str)[:128]
+                pad = 128 - len(ids)
+                if pad>0:
+                    ids += [sp.pad_id()]*pad; pieces += ['<pad>']*pad
+                wb = torch.tensor([1.0 if p.startswith('▁') else 0.0 for p in pieces], dtype=torch.float)
+                pn = torch.tensor([1.0 if p in punct_set else 0.0 for p in pieces], dtype=torch.float)
+                sl = torch.tensor([float(len(p.replace('▁',''))) for p in pieces], dtype=torch.float)
+                sample.update({
+                    'sp_token_ids': torch.tensor(ids, dtype=torch.long),
+                    'sp_wb': wb, 'sp_punct': pn, 'sp_sublen': sl
+                })
+            # labels
+            import numpy as np
+            p = np.zeros(8, dtype=np.float32)
+            prim = r.get('plutchik',{}).get('primary','joy')
+            inten = float(r.get('plutchik',{}).get('intensity',0.5))
+            labels = ['joy','trust','fear','surprise','sadness','disgust','anger','anticipation']
+            if prim in labels: p[labels.index(prim)] = inten
+            sec = r.get('plutchik',{}).get('secondary')
+            sec_map = {'optimism':'anticipation','admiration':'trust','anxiety':'fear','hope':'anticipation','excitement':'joy','contentment':'joy','grief':'sadness','despair':'sadness','contempt':'disgust','outrage':'anger','fury':'anger','resentment':'anger'}
+            if sec in sec_map: p[labels.index(sec_map[sec])] += 0.25
+            p = p / (p.sum()+1e-6)
+            intents = ['inform','negotiate','question','clarify','social','express','command','request']
+            mapped = {'share_news':'inform','ask_help':'request','clarify':'clarify','complain':'express','thank':'social','propose':'negotiate'}.get(r.get('intent','inform'),'inform')
+            oh = np.zeros(8, dtype=np.float32); oh[intents.index(mapped)] = 1.0
+            style = r.get('style',{}); beta=float(style.get('beta',0.5)); phi=float(style.get('phi',0.5))
+            sample.update({
+                'plutchik': torch.tensor(p, dtype=torch.float),
+                'intent': torch.tensor(oh, dtype=torch.float),
+                'urgency': torch.tensor([inten], dtype=torch.float),
+                'certainty': torch.tensor([phi if phi>0 else 0.5], dtype=torch.float),
+                'formality': torch.tensor([beta], dtype=torch.float),
+                'politeness': torch.tensor([phi], dtype=torch.float),
+            })
+            return sample
+
+    records = load_emotion_dataset(args.data)
+    from sklearn.model_selection import train_test_split
+    train_records, temp_records = train_test_split(records, test_size=0.2, random_state=42)
+    val_records, _ = train_test_split(temp_records, test_size=0.5, random_state=42)
+    train_loader = tdata.DataLoader(JsonDataset(train_records), batch_size=args.batch_size, shuffle=True)
+    val_loader = tdata.DataLoader(JsonDataset(val_records), batch_size=args.batch_size, shuffle=False)
+
+    class TorchSNN(tnn.Module):
+        def __init__(self, sp_vocab=32000, sbert_dim=768, num_experts=4):
+            super().__init__()
+            self.sp_embed = tnn.Embedding(sp_vocab, 128)
+            self.pitch = tnn.Sequential(tnn.Linear(3,64), tnn.GELU())
+            self.energy = tnn.Sequential(tnn.Linear(3,64), tnn.GELU())
+            self.emotion = tnn.Sequential(tnn.Linear(sbert_dim+64+64,128), tnn.ReLU(), tnn.Linear(128,8))
+            self.intent_h = tnn.Sequential(tnn.Linear(sbert_dim+128+64,128), tnn.ReLU())
+            self.intent = tnn.Linear(128,8)
+            self.mod = tnn.Linear(128,4)
+            self.gate = tnn.Linear(sbert_dim+128+128+64+64, num_experts)
+            self.out = tnn.Linear(sbert_dim+128+128+64+64, 256)
+        def forward(self, sbert_emb, batch):
+            # SP features
+            if 'sp_token_ids' in batch:
+                sp_e = self.sp_embed(batch['sp_token_ids'])  # [B,128,128]
+                wb = batch['sp_wb']; pn = batch['sp_punct']; sl = batch['sp_sublen']
+                sln = sl / (sl.max(dim=1, keepdim=True).values.clamp(min=1.0))
+                pitch = self.pitch(torch.stack([
+                    torch.std((sp_e.mean(-1)), dim=1), torch.mean((sp_e.mean(-1)), dim=1), wb.mean(1)
+                ], dim=1))
+                energy = self.energy(torch.stack([
+                    torch.sum(sln, dim=1), torch.sum(pn, dim=1), torch.sum(wb, dim=1)
+                ], dim=1))
+            else:
+                pitch = torch.zeros((sbert_emb.size(0),64), device=sbert_emb.device)
+                energy = torch.zeros((sbert_emb.size(0),64), device=sbert_emb.device)
+            emo_h = torch.relu(self.emotion[0](torch.cat([sbert_emb, pitch, energy], dim=-1)))
+            emo_logits = self.emotion[2](torch.relu(self.emotion[1](emo_h))) if len(self.emotion)==3 else self.emotion[-1](emo_h)
+            intent_h = self.intent_h(torch.cat([sbert_emb, emo_h, pitch], dim=-1))
+            intent_logits = self.intent(intent_h)
+            mods = torch.sigmoid(self.mod(intent_h))
+            comp = torch.cat([sbert_emb, emo_h, intent_h, pitch, energy], dim=-1)
+            gate = torch.softmax(self.gate(comp), dim=-1)
+            out = self.out(comp)
+            return emo_logits, intent_logits, mods, gate, out
+
+    model = TorchSNN(sp_vocab=32000, sbert_dim=sbert.config.hidden_size if hasattr(sbert,'config') else 768, num_experts=args.num_experts).to(device)
+    optim = topt.AdamW(list(model.parameters())+list(sbert.parameters()), lr=args.lr, weight_decay=0.02)
+
+    def smooth(y, n, eps): return (1-eps)*y + eps/n
+    for epoch in range(args.epochs):
+        model.train(); sbert.train()
+        total=0.0; cnt=0
+        optim.zero_grad()
+        k=0
+        for batch in train_loader:
+            batch = {k:(v.to(device)) for k,v in batch.items() if isinstance(v, torch.Tensor)}
+            with torch.no_grad():
+                outputs = sbert(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'])
+                hidden = outputs.last_hidden_state
+                mask = batch['attention_mask'].float(); denom = mask.sum(1, keepdim=True).clamp(min=1.0)
+                sbert_emb = (hidden * mask.unsqueeze(-1)).sum(1)/denom
+            emo_logits, intent_logits, mods, gate, out = model(sbert_emb, batch)
+            el = tnn.functional.cross_entropy(emo_logits, smooth(batch['plutchik'],8,args.label_smoothing))
+            il = tnn.functional.cross_entropy(intent_logits, smooth(batch['intent'],8,args.label_smoothing))
+            ml = tnn.functional.mse_loss(mods[:,0:1], batch['urgency']) + \
+                 tnn.functional.mse_loss(mods[:,1:2], batch['certainty']) + \
+                 tnn.functional.mse_loss(mods[:,2:3], batch['formality']) + \
+                 tnn.functional.mse_loss(mods[:,3:4], batch['politeness'])
+            div = -(gate * (gate.clamp(min=1e-8)).log()).sum(-1).mean()
+            loss = el + il + 0.5*ml + args.diversity_coef*div
+            loss.backward()
+            k+=1
+            if k % int(os.environ.get('GRAD_ACCUM_STEPS','1')) == 0:
+                xm.optimizer_step(optim, barrier=True)
+                optim.zero_grad()
+            total += loss.item(); cnt += 1
+        if cnt>0: print(f"Epoch {epoch+1}: train_loss={total/cnt:.4f}")
+        # val
+        model.eval(); sbert.eval(); vloss=0.0; vcnt=0
+        with torch.no_grad():
+            for batch in val_loader:
+                batch = {k:(v.to(device)) for k,v in batch.items() if isinstance(v, torch.Tensor)}
+                outputs = sbert(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'])
+                hidden = outputs.last_hidden_state
+                mask = batch['attention_mask'].float(); denom = mask.sum(1, keepdim=True).clamp(min=1.0)
+                sbert_emb = (hidden * mask.unsqueeze(-1)).sum(1)/denom
+                emo_logits, intent_logits, mods, gate, out = model(sbert_emb, batch)
+                el = tnn.functional.cross_entropy(emo_logits, smooth(batch['plutchik'],8,args.label_smoothing))
+                il = tnn.functional.cross_entropy(intent_logits, smooth(batch['intent'],8,args.label_smoothing))
+                ml = tnn.functional.mse_loss(mods[:,0:1], batch['urgency']) + \
+                     tnn.functional.mse_loss(mods[:,1:2], batch['certainty']) + \
+                     tnn.functional.mse_loss(mods[:,2:3], batch['formality']) + \
+                     tnn.functional.mse_loss(mods[:,3:4], batch['politeness'])
+                div = -(gate * (gate.clamp(min=1e-8)).log()).sum(-1).mean()
+                loss = el + il + 0.5*ml + args.diversity_coef*div
+                vloss += loss.item(); vcnt += 1
+        if vcnt>0: print(f"Epoch {epoch+1}: val_loss={vloss/vcnt:.4f}")
+        if args.ckpt_dir and args.process_id == 0 and (best_val is None or (vcnt>0 and vloss/vcnt < best_val)):
+            best_val = vloss/vcnt if vcnt>0 else None
+            Path(args.ckpt_dir).mkdir(parents=True, exist_ok=True)
+            torch.save({'snn': model.state_dict(), 'sbert': sbert.state_dict()}, str(Path(args.ckpt_dir)/f'ckpt_epoch_{epoch+1:04d}.pt'))
+
+
 def main():
     parser = argparse.ArgumentParser(description='TPU v4-32 training for Emotion+Intent (SBERT-based)')
     parser.add_argument('--data', required=True, help='Path to emotions.jsonl')
@@ -350,6 +528,7 @@ def main():
     parser.add_argument('--final-lr', type=float, default=float(os.environ.get('FINAL_LR', '1e-4')))
     parser.add_argument('--sbert-adapter-dim', type=int, default=int(os.environ.get('SBERT_ADAPTER_DIM', '256')))
     parser.add_argument('--sbert-dropout', type=float, default=float(os.environ.get('SBERT_DROPOUT', '0.1')))
+    parser.add_argument('--torch-xla', action='store_true', help='Use PyTorch/XLA training pipeline')
     args = parser.parse_args()
 
     # Initialize JAX distributed for TPU pods (run on ALL hosts with unique process_id)
@@ -359,6 +538,9 @@ def main():
                          num_processes=args.num_processes,
                          process_id=args.process_id)
     print(f"Devices (pid {args.process_id}/{args.num_processes}): {jax.devices()}")
+    # Torch/XLA path
+    if args.torch_xla:
+        return run_torch_xla(args)
     tokenizer = None
     sbert_flax = None
     sbert_model = None

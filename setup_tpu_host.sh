@@ -43,6 +43,8 @@ fi
 
 # Ensure user local bin is in PATH
 export PATH="$HOME/.local/bin:$PATH"
+# Set JAX to use TPU platform
+export JAX_PLATFORMS=tpu
 
 # 1) Python deps — pin compatible versions and ensure NumPy ≥ 2.0
 # Use python3 -m pip to ensure we're using the correct Python
@@ -69,7 +71,7 @@ cat <<EOF
 Setup complete on host (proc-id=${PROC_ID}/${NUM_PROC}).
 Run this command to start training:
 
-COORDINATOR_ADDRESS=${COORDINATOR} NUM_PROCESSES=${NUM_PROC} PROCESS_ID=${PROC_ID} \
+JAX_PLATFORMS=tpu COORDINATOR_ADDRESS=${COORDINATOR} NUM_PROCESSES=${NUM_PROC} PROCESS_ID=${PROC_ID} \
 ${PYTHON_RUNNER} ${REPO_ROOT}/train_tpu_v4.py \
   --data ${DATA} --epochs 10 --batch-size 128 --lr 3e-5 \
   --coordinator-address ${COORDINATOR} --num-processes ${NUM_PROC} --process-id ${PROC_ID}

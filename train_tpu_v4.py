@@ -251,18 +251,18 @@ def preprocess(records, sbert_model, sp_model_path: str | None = None,
         })
     return processed
 
-def train_step(model, sbert_flax_module, use_flax_sbert, state, batch,
-               num_classes_emotion: int = 8, num_classes_intent: int = 8,
-               label_smoothing: float = 0.0, diversity_coef: float = 0.02):
+def compute_grads(model, sbert_flax_module, use_flax_sbert, params_all, batch,
+                  num_classes_emotion: int = 8, num_classes_intent: int = 8,
+                  label_smoothing: float = 0.0, diversity_coef: float = 0.02):
     def smooth_labels(y, n_classes):
         return (1.0 - label_smoothing) * y + label_smoothing / n_classes
-    def loss_fn(params_all):
+    def loss_fn(pa):
         # Compute SBERT embeddings
         if use_flax_sbert:
             outputs = sbert_flax_module(
                 input_ids=batch['sbert_input_ids'],
                 attention_mask=batch['sbert_attention_mask'],
-                params=params_all['sbert'],
+                params=pa['sbert'],
                 train=False
             )
             hidden = outputs.last_hidden_state  # [B,L,H] (bf16)
@@ -273,7 +273,7 @@ def train_step(model, sbert_flax_module, use_flax_sbert, state, batch,
             sbert_emb = batch['sbert_embedding']
         # Forward SNN
         out = model.apply(
-            {'params': params_all['snn']},
+            {'params': pa['snn']},
             sbert_emb,
             batch['pos_tags'],
             batch['syntax_features'],
@@ -293,9 +293,8 @@ def train_step(model, sbert_flax_module, use_flax_sbert, state, batch,
         gw = out['gate_weights']; div = -jnp.mean(jnp.sum(gw * jnp.log(gw + 1e-8), axis=-1))
         total = 1.0*el + 1.0*il + 0.5*ml + diversity_coef*div
         return total, {'loss': total, 'emotion': el, 'intent': il, 'modifiers': ml, 'diversity': -div}
-    (loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
-    new_state = state.apply_gradients(grads=grads)
-    return new_state, metrics
+    (loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(params_all)
+    return grads, metrics
 
 def batches(data, bs=128, shuffle=True):
     idx = np.arange(len(data));
@@ -463,15 +462,29 @@ def main():
     print("Starting training...")
     t0 = time.time()
     best_val = None
+    accum_steps = max(1, int(os.environ.get('GRAD_ACCUM_STEPS', os.environ.get('grad_accum_steps', '1'))))
     for epoch in range(args.epochs):
         metrics_buf = []
+        accum_grads = jax.tree_map(lambda x: jnp.zeros_like(x), state.params)
+        k = 0
         for step, batch in enumerate(batches(train_processed, bs=args.batch_size, shuffle=True)):
-            state, metrics = train_step(model, sbert_flax, args.use_flax_sbert, state, batch,
-                                        label_smoothing=args.label_smoothing, diversity_coef=args.diversity_coef)
+            grads, metrics = compute_grads(model, sbert_flax, args.use_flax_sbert, state.params, batch,
+                                           label_smoothing=args.label_smoothing, diversity_coef=args.diversity_coef)
+            accum_grads = jax.tree_map(lambda a,g: a+g, accum_grads, grads)
+            k += 1
+            if k == accum_steps:
+                avg_grads = jax.tree_map(lambda g: g / accum_steps, accum_grads)
+                state = state.apply_gradients(grads=avg_grads)
+                accum_grads = jax.tree_map(lambda x: jnp.zeros_like(x), state.params)
+                k = 0
             metrics_buf.append(metrics)
             if (step+1) % 10 == 0 and (args.process_id == 0):
                 avg = jnp.mean(jnp.array([m['loss'] for m in metrics_buf[-10:]]))
                 print(f"  epoch {epoch+1} step {step+1}: loss={float(avg):.4f}")
+        # flush leftover grads
+        if k > 0:
+            avg_grads = jax.tree_map(lambda g: g / k, accum_grads)
+            state = state.apply_gradients(grads=avg_grads)
         if args.process_id == 0:
             avg_epoch = jnp.mean(jnp.array([m['loss'] for m in metrics_buf]))
             # Validation

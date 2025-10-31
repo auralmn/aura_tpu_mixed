@@ -343,10 +343,19 @@ def batches(data, bs=128, shuffle=True):
 def run_torch_xla(args):
     if torch is None or xm is None or AutoTokenizer is None or AutoModel is None:
         raise RuntimeError('torch/torch_xla/transformers not installed')
+    import os
+    os.environ.setdefault('TOKENIZERS_PARALLELISM', 'false')
+    try:
+        torch.set_num_threads(1)
+    except Exception:
+        pass
     device = xm.xla_device()
     tokenizer = AutoTokenizer.from_pretrained(args.sbert_model_name, use_fast=True)
     sbert = AutoModel.from_pretrained(args.sbert_model_name).to(device)
-    sbert.eval()  # will fine-tune but keep dropout off by default; XLA bf16 via env
+    # Enable gradient checkpointing to save memory if supported
+    if hasattr(sbert, 'gradient_checkpointing_enable'):
+        sbert.gradient_checkpointing_enable()
+    sbert.train()
 
     import sentencepiece as spm
     sp = None
@@ -359,7 +368,8 @@ def run_torch_xla(args):
             self.recs = records
         def __len__(self): return len(self.recs)
         def __getitem__(self, idx):
-            r = self.recs[idx]; text = r.get('text','')
+            r = self.recs[idx]; text = r.get('text','') or ''
+            text = text.replace('\u00A0', ' ')
             tok = tokenizer(text, max_length=args.sbert_max_len, truncation=True, padding='max_length', return_tensors='pt')
             sample = {
                 'input_ids': tok['input_ids'].squeeze(0),
@@ -407,8 +417,8 @@ def run_torch_xla(args):
     from sklearn.model_selection import train_test_split
     train_records, temp_records = train_test_split(records, test_size=0.2, random_state=42)
     val_records, _ = train_test_split(temp_records, test_size=0.5, random_state=42)
-    train_loader = tdata.DataLoader(JsonDataset(train_records), batch_size=args.batch_size, shuffle=True)
-    val_loader = tdata.DataLoader(JsonDataset(val_records), batch_size=args.batch_size, shuffle=False)
+    train_loader = tdata.DataLoader(JsonDataset(train_records), batch_size=args.batch_size, shuffle=True, num_workers=0, persistent_workers=False)
+    val_loader = tdata.DataLoader(JsonDataset(val_records), batch_size=args.batch_size, shuffle=False, num_workers=0, persistent_workers=False)
 
     class TorchSNN(tnn.Module):
         def __init__(self, sp_vocab=32000, sbert_dim=768, num_experts=4):
@@ -458,11 +468,10 @@ def run_torch_xla(args):
         k=0
         for batch in train_loader:
             batch = {k:(v.to(device)) for k,v in batch.items() if isinstance(v, torch.Tensor)}
-            with torch.no_grad():
-                outputs = sbert(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'])
-                hidden = outputs.last_hidden_state
-                mask = batch['attention_mask'].float(); denom = mask.sum(1, keepdim=True).clamp(min=1.0)
-                sbert_emb = (hidden * mask.unsqueeze(-1)).sum(1)/denom
+            outputs = sbert(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'])
+            hidden = outputs.last_hidden_state
+            mask = batch['attention_mask'].float(); denom = mask.sum(1, keepdim=True).clamp(min=1.0)
+            sbert_emb = (hidden * mask.unsqueeze(-1)).sum(1)/denom
             emo_logits, intent_logits, mods, gate, out = model(sbert_emb, batch)
             el = tnn.functional.cross_entropy(emo_logits, smooth(batch['plutchik'],8,args.label_smoothing))
             il = tnn.functional.cross_entropy(intent_logits, smooth(batch['intent'],8,args.label_smoothing))

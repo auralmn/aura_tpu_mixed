@@ -585,11 +585,6 @@ def main():
 
     # Torch/XLA path first, skip JAX init/prints entirely
     if args.torch_xla:
-        try:
-            import torch_xla.core.xla_model as xm
-            print(f"[XLA] Supported devices: {xm.get_xla_supported_devices('TPU')}")
-        except Exception:
-            pass
         return run_torch_xla(args)
 
     # Initialize JAX distributed for TPU pods (run on ALL hosts with unique process_id)

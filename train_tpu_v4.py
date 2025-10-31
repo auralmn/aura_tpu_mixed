@@ -8,6 +8,10 @@ import numpy as np
 if int(np.__version__.split('.')[0]) < 2:
     raise RuntimeError(f"NumPy 2.0+ required (found {np.__version__}). Install with: python3.12 -m pip install -U 'numpy>=2.0.0' --user")
 
+import sys
+# Avoid JAX TPU init warnings when running Torch/XLA path
+if ('--torch-xla' in sys.argv) and (os.environ.get('JAX_PLATFORMS') is None):
+    os.environ['JAX_PLATFORMS'] = 'cpu'
 import jax
 import jax.numpy as jnp
 from jax import random, jit

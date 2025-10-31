@@ -18,6 +18,11 @@ import optax
 from jax import distributed as jdist
 from pathlib import Path
 from typing import Optional
+try:
+    from transformers import AutoTokenizer, FlaxAutoModel
+except Exception:
+    AutoTokenizer = None
+    FlaxAutoModel = None
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -136,7 +141,8 @@ def load_emotion_dataset(jsonl_path: str):
                     pass
     return recs
 
-def preprocess(records, sbert_model, sp_model_path: str | None = None):
+def preprocess(records, sbert_model, sp_model_path: str | None = None,
+               hf_tokenizer=None, sbert_max_len: int = 128):
     sp = None
     if sp_model_path:
         try:
@@ -154,7 +160,13 @@ def preprocess(records, sbert_model, sp_model_path: str | None = None):
     processed = []
     for idx, r in enumerate(records):
         text = r.get('text', '')
-        emb = sbert_model.encode(text, convert_to_tensor=False)
+        if hf_tokenizer is not None:
+            tok = hf_tokenizer(text, max_length=sbert_max_len, truncation=True, padding='max_length', return_tensors=None)
+            input_ids_np = np.array(tok['input_ids'], dtype=np.int32)
+            attn_mask_np = np.array(tok['attention_mask'], dtype=np.int32)
+            emb = None
+        else:
+            emb = sbert_model.encode(text, convert_to_tensor=False)
         pos = np.zeros((128, 10), dtype=np.float32)
         syn = np.zeros((128, 3), dtype=np.float32)
         if sp is not None:
@@ -221,7 +233,9 @@ def preprocess(records, sbert_model, sp_model_path: str | None = None):
             sp_punct = pn.astype(np.float32)
             sp_sublen = sl.astype(np.float32)
         processed.append({
-            'sbert_embedding': emb.astype(np.float32),
+            'sbert_embedding': (emb.astype(np.float32) if emb is not None else None),
+            'sbert_input_ids': (input_ids_np if hf_tokenizer is not None else None),
+            'sbert_attention_mask': (attn_mask_np if hf_tokenizer is not None else None),
             'pos_tags': pos,
             'syntax_features': syn,
             'sp_token_ids': sp_token_ids,
@@ -237,14 +251,28 @@ def preprocess(records, sbert_model, sp_model_path: str | None = None):
         })
     return processed
 
-@jit
-def train_step(state, batch, num_classes_emotion: int = 8, num_classes_intent: int = 8, label_smoothing: float = 0.0, diversity_coef: float = 0.02):
+def train_step(model, sbert_flax_module, use_flax_sbert, state, batch,
+               num_classes_emotion: int = 8, num_classes_intent: int = 8,
+               label_smoothing: float = 0.0, diversity_coef: float = 0.02):
     def smooth_labels(y, n_classes):
         return (1.0 - label_smoothing) * y + label_smoothing / n_classes
-    def loss_fn(p):
-        out = state.apply_fn(
-            {'params': p},
-            batch['sbert_embedding'],
+    def loss_fn(params_all):
+        # Compute SBERT embeddings
+        if use_flax_sbert:
+            outputs = sbert_flax_module.apply({'params': params_all['sbert']},
+                                              input_ids=batch['sbert_input_ids'],
+                                              attention_mask=batch['sbert_attention_mask'],
+                                              train=True)
+            hidden = outputs.last_hidden_state  # [B,L,H]
+            mask = batch['sbert_attention_mask'].astype(jnp.float32)
+            denom = jnp.clip(jnp.sum(mask, axis=1, keepdims=True), a_min=1.0)
+            sbert_emb = jnp.sum(hidden * mask[..., None], axis=1) / denom
+        else:
+            sbert_emb = batch['sbert_embedding']
+        # Forward SNN
+        out = model.apply(
+            {'params': params_all['snn']},
+            sbert_emb,
             batch['pos_tags'],
             batch['syntax_features'],
             batch['sp_token_ids'],
@@ -253,7 +281,7 @@ def train_step(state, batch, num_classes_emotion: int = 8, num_classes_intent: i
             batch['sp_sublen'],
             training=True
         )
-        # Label smoothing
+        # Losses
         emo_targets = smooth_labels(batch['plutchik_probs'], num_classes_emotion)
         intent_targets = smooth_labels(batch['intent_label'], num_classes_intent)
         el = optax.softmax_cross_entropy(out['emotions']['plutchik'], emo_targets).mean()
@@ -264,15 +292,17 @@ def train_step(state, batch, num_classes_emotion: int = 8, num_classes_intent: i
         total = 1.0*el + 1.0*il + 0.5*ml + diversity_coef*div
         return total, {'loss': total, 'emotion': el, 'intent': il, 'modifiers': ml, 'diversity': -div}
     (loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
-    return state.apply_gradients(grads=grads), metrics
+    new_state = state.apply_gradients(grads=grads)
+    return new_state, metrics
 
 def batches(data, bs=128, shuffle=True):
     idx = np.arange(len(data));
     if shuffle: np.random.shuffle(idx)
     for s in range(0, len(idx), bs):
         sel = idx[s:s+bs]; d=[data[i] for i in sel]
-        yield {
-            'sbert_embedding': jnp.array([x['sbert_embedding'] for x in d]),
+        # Build SBERT inputs: prefer HF ids/masks if present; else use embeddings
+        has_hf = d[0].get('sbert_input_ids', None) is not None
+        batch_dict = {
             'pos_tags': jnp.array([x['pos_tags'] for x in d]),
             'syntax_features': jnp.array([x['syntax_features'] for x in d]),
             'sp_token_ids': jnp.array([x.get('sp_token_ids', np.zeros((128,), np.int32)) for x in d], dtype=jnp.int32),
@@ -286,6 +316,15 @@ def batches(data, bs=128, shuffle=True):
             'formality': jnp.array([x['formality'] for x in d]).reshape(-1,1),
             'politeness': jnp.array([x['politeness'] for x in d]).reshape(-1,1),
         }
+        if has_hf:
+            batch_dict['sbert_input_ids'] = jnp.array([x['sbert_input_ids'] for x in d], dtype=jnp.int32)
+            batch_dict['sbert_attention_mask'] = jnp.array([x['sbert_attention_mask'] for x in d], dtype=jnp.int32)
+            batch_dict['sbert_embedding'] = None
+        else:
+            batch_dict['sbert_embedding'] = jnp.array([x['sbert_embedding'] for x in d])
+            batch_dict['sbert_input_ids'] = None
+            batch_dict['sbert_attention_mask'] = None
+        yield batch_dict
 
 def main():
     parser = argparse.ArgumentParser(description='TPU v4-32 training for Emotion+Intent (SBERT-based)')
@@ -294,6 +333,9 @@ def main():
     parser.add_argument('--batch-size', type=int, default=128)
     parser.add_argument('--lr', type=float, default=3e-5)
     parser.add_argument('--model', default='sentence-transformers/all-MiniLM-L6-v2')
+    parser.add_argument('--use-flax-sbert', action='store_true')
+    parser.add_argument('--sbert-model-name', default=os.environ.get('SBERT_MODEL_NAME', 'sentence-transformers/all-mpnet-base-v2'))
+    parser.add_argument('--sbert-max-len', type=int, default=int(os.environ.get('SBERT_MAX_LEN', '128')))
     parser.add_argument('--sp-model', default=os.environ.get('SP_MODEL', ''), help='Optional SentencePiece .model path')
     # Multi-host TPU flags (or via env: COORDINATOR_ADDRESS, NUM_PROCESSES, PROCESS_ID)
     parser.add_argument('--coordinator-address', default=os.environ.get('COORDINATOR_ADDRESS', 'localhost:12355'))
@@ -316,9 +358,18 @@ def main():
                          num_processes=args.num_processes,
                          process_id=args.process_id)
     print(f"Devices (pid {args.process_id}/{args.num_processes}): {jax.devices()}")
-    if SentenceTransformer is None:
-        raise RuntimeError('sentence-transformers not installed')
-    sbert_model = SentenceTransformer(args.model)
+    tokenizer = None
+    sbert_flax = None
+    sbert_model = None
+    if args.use_flax_sbert:
+        if AutoTokenizer is None or FlaxAutoModel is None:
+            raise RuntimeError('transformers not installed')
+        tokenizer = AutoTokenizer.from_pretrained(args.sbert_model_name)
+        sbert_flax = FlaxAutoModel.from_pretrained(args.sbert_model_name, dtype=jnp.float32)
+    else:
+        if SentenceTransformer is None:
+            raise RuntimeError('sentence-transformers not installed')
+        sbert_model = SentenceTransformer(args.model)
 
     print(f"Loading dataset: {args.data}")
     records = load_emotion_dataset(args.data)
@@ -331,14 +382,18 @@ def main():
 
     print("Preprocessing...")
     sp_path = args.sp_model if args.sp_model else None
-    train_processed = preprocess(train_records, sbert_model, sp_model_path=sp_path)
-    val_processed   = preprocess(val_records, sbert_model, sp_model_path=sp_path)
+    train_processed = preprocess(train_records, sbert_model, sp_model_path=sp_path,
+                                 hf_tokenizer=tokenizer if args.use_flax_sbert else None,
+                                 sbert_max_len=args.sbert_max_len)
+    val_processed   = preprocess(val_records, sbert_model, sp_model_path=sp_path,
+                                 hf_tokenizer=tokenizer if args.use_flax_sbert else None,
+                                 sbert_max_len=args.sbert_max_len)
 
     rng = random.PRNGKey(42)
     model = ConsciousnessAwareSNN(num_experts=args.num_experts,
                                    sbert_adapter_dim=args.sbert_adapter_dim,
                                    sbert_dropout=args.sbert_dropout)
-    params = model.init(
+    snn_params = model.init(
         {'params': rng},
         jnp.ones((2,384)),
         jnp.ones((2,128,10)),
@@ -349,11 +404,12 @@ def main():
         jnp.zeros((2,128)),
         training=False
     )['params']
+    params_all = {'snn': snn_params, 'sbert': (sbert_flax.params if args.use_flax_sbert else {})}
 
     steps = (max(1, len(train_processed)//args.batch_size))*args.epochs
     schedule = optax.warmup_cosine_decay_schedule(0.0, args.lr, max(10, steps//20), steps, args.final_lr)
     tx = optax.chain(optax.clip_by_global_norm(1.0), optax.adamw(learning_rate=schedule, weight_decay=0.01))
-    state = train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
+    state = train_state.TrainState.create(apply_fn=None, params=params_all, tx=tx)
 
     def save_checkpoint(epoch_idx: int, final: bool=False):
         if args.process_id != 0:
@@ -369,10 +425,20 @@ def main():
             f.write(data)
         print(f"Saved checkpoint: {out_path}")
 
-    @jit
-    def eval_step(params, batch):
-        out = model.apply({'params': params},
-                          batch['sbert_embedding'], batch['pos_tags'], batch['syntax_features'],
+    def eval_step(params_all, batch):
+        if args.use_flax_sbert:
+            outputs = sbert_flax.apply({'params': params_all['sbert']},
+                                       input_ids=batch['sbert_input_ids'],
+                                       attention_mask=batch['sbert_attention_mask'],
+                                       train=False)
+            hidden = outputs.last_hidden_state
+            mask = batch['sbert_attention_mask'].astype(jnp.float32)
+            denom = jnp.clip(jnp.sum(mask, axis=1, keepdims=True), a_min=1.0)
+            sbert_emb = jnp.sum(hidden * mask[..., None], axis=1) / denom
+        else:
+            sbert_emb = batch['sbert_embedding']
+        out = model.apply({'params': params_all['snn']},
+                          sbert_emb, batch['pos_tags'], batch['syntax_features'],
                           batch['sp_token_ids'], batch['sp_wb'], batch['sp_punct'], batch['sp_sublen'],
                           training=False)
         emo_targets = (1.0 - args.label_smoothing) * batch['plutchik_probs'] + args.label_smoothing / 8
@@ -391,7 +457,8 @@ def main():
     for epoch in range(args.epochs):
         metrics_buf = []
         for step, batch in enumerate(batches(train_processed, bs=args.batch_size, shuffle=True)):
-            state, metrics = train_step(state, batch, label_smoothing=args.label_smoothing, diversity_coef=args.diversity_coef)
+            state, metrics = train_step(model, sbert_flax, args.use_flax_sbert, state, batch,
+                                        label_smoothing=args.label_smoothing, diversity_coef=args.diversity_coef)
             metrics_buf.append(metrics)
             if (step+1) % 10 == 0 and (args.process_id == 0):
                 avg = jnp.mean(jnp.array([m['loss'] for m in metrics_buf[-10:]]))

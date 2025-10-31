@@ -10,7 +10,7 @@ set -euo pipefail
 #     --proc-id 0
 # Then start training:
 #   COORDINATOR_ADDRESS=${COORDINATOR} NUM_PROCESSES=${NUM_PROC} PROCESS_ID=${PROC_ID} \
-#   uv run python ${REPO_ROOT}/train_tpu_v4.py \
+#   python ${REPO_ROOT}/train_tpu_v4.py \
 #     --data ${DATA} --epochs 10 --batch-size 128 --lr 3e-5 \
 #     --coordinator-address ${COORDINATOR} --num-processes ${NUM_PROC} --process-id ${PROC_ID}
 
@@ -41,28 +41,30 @@ if [[ ! -f "${REPO_ROOT}/train_tpu_v4.py" ]]; then
   exit 1
 fi
 
-# 1) Python deps (UV per policy) — pin compatible versions and ensure NumPy ≥ 2.0
-uv pip install --system -U numpy>=2.0.0 --quiet
-uv pip install --system -U jax==0.4.31 jaxlib==0.4.31 flax optax sentence-transformers spacy scikit-learn --quiet
+# 1) Python deps — pin compatible versions and ensure NumPy ≥ 2.0
+pip3 install -U numpy>=2.0.0 --quiet
+pip3 install -U jax==0.4.31 jaxlib==0.4.31 flax optax sentence-transformers spacy scikit-learn --quiet
 
 # 2) SpaCy model (silent ok)
 python -m spacy download en_core_web_sm >/dev/null 2>&1 || true
 
 # 3) Sanity checks
-uv run python - <<'PY'
+python - <<'PY'
 import jax
 print("JAX version:", jax.__version__)
 print("Devices:", jax.devices())
 PY
 
 # 4) Echo next-step run command tailored for this host
+PYTHON_RUNNER="python"
+
 cat <<EOF
 
 Setup complete on host (proc-id=${PROC_ID}/${NUM_PROC}).
 Run this command to start training:
 
 COORDINATOR_ADDRESS=${COORDINATOR} NUM_PROCESSES=${NUM_PROC} PROCESS_ID=${PROC_ID} \
-uv run python ${REPO_ROOT}/train_tpu_v4.py \
+${PYTHON_RUNNER} ${REPO_ROOT}/train_tpu_v4.py \
   --data ${DATA} --epochs 10 --batch-size 128 --lr 3e-5 \
   --coordinator-address ${COORDINATOR} --num-processes ${NUM_PROC} --process-id ${PROC_ID}
 

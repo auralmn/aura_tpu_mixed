@@ -41,11 +41,21 @@ class ConsciousnessAwareSNN(nn.Module):
     hidden_dim: int = 256
     sbert_dim: int = 384
     sp_vocab_size: int = 32000
+    sbert_adapter_dim: int = 0
+    sbert_dropout: float = 0.0
 
     @nn.compact
     def __call__(self, sbert_embeddings, pos_tags, syntax_features,
                  sp_token_ids, sp_wb, sp_punct, sp_sublen,
                  training=True):
+        # Optional SBERT adapter (trainable projection + dropout)
+        if self.sbert_adapter_dim and self.sbert_adapter_dim > 0:
+            x = nn.Dense(self.sbert_adapter_dim, name='sbert_adapter_dense')(sbert_embeddings)
+            if self.sbert_dropout and self.sbert_dropout > 0:
+                x = nn.Dropout(rate=self.sbert_dropout, deterministic=not training)(x)
+            sbert_feat = nn.gelu(x)
+        else:
+            sbert_feat = sbert_embeddings
         # SentencePiece token embeddings
         sp_embed = nn.Embed(num_embeddings=self.sp_vocab_size, features=128, name='sp_token_embeddings')(sp_token_ids)
         # Normalize lengths
@@ -82,16 +92,16 @@ class ConsciousnessAwareSNN(nn.Module):
         pauses_legacy = nn.sigmoid(nn.Dense(1)(nn.relu(nn.Dense(32)(syntax_features)))).squeeze(-1)
         stress_legacy = nn.sigmoid(nn.Dense(1)(nn.relu(nn.Dense(32)(pos_tags)))).squeeze(-1)
         # Emotion and intent heads
-        emotion_h = nn.relu(nn.Dense(128)(jnp.concatenate([sbert_embeddings, pitch, energy], axis=-1)))
+        emotion_h = nn.relu(nn.Dense(128)(jnp.concatenate([sbert_feat, pitch, energy], axis=-1)))
         plutchik_probs = nn.softmax(nn.Dense(8)(emotion_h))
-        intent_h = nn.relu(nn.Dense(128)(jnp.concatenate([sbert_embeddings, emotion_h, pitch], axis=-1)))
+        intent_h = nn.relu(nn.Dense(128)(jnp.concatenate([sbert_feat, emotion_h, pitch], axis=-1)))
         primary_intent = nn.softmax(nn.Dense(8)(intent_h))
         urgency = nn.sigmoid(nn.Dense(1)(intent_h))
         certainty = nn.sigmoid(nn.Dense(1)(intent_h))
         formality = nn.sigmoid(nn.Dense(1)(intent_h))
         politeness = nn.sigmoid(nn.Dense(1)(intent_h))
         # Gating and output
-        composite = jnp.concatenate([sbert_embeddings, emotion_h, intent_h, pitch, energy], axis=-1)
+        composite = jnp.concatenate([sbert_feat, emotion_h, intent_h, pitch, energy], axis=-1)
         gate_weights = nn.softmax(nn.Dense(self.num_experts)(composite))
         output = nn.Dense(self.hidden_dim)(composite)
         return {
@@ -295,6 +305,8 @@ def main():
     parser.add_argument('--diversity-coef', type=float, default=float(os.environ.get('DIVERSITY_COEF', '0.05')))
     parser.add_argument('--label-smoothing', type=float, default=float(os.environ.get('LABEL_SMOOTHING', '0.05')))
     parser.add_argument('--final-lr', type=float, default=float(os.environ.get('FINAL_LR', '1e-4')))
+    parser.add_argument('--sbert-adapter-dim', type=int, default=int(os.environ.get('SBERT_ADAPTER_DIM', '256')))
+    parser.add_argument('--sbert-dropout', type=float, default=float(os.environ.get('SBERT_DROPOUT', '0.1')))
     args = parser.parse_args()
 
     # Initialize JAX distributed for TPU pods (run on ALL hosts with unique process_id)
@@ -323,7 +335,9 @@ def main():
     val_processed   = preprocess(val_records, sbert_model, sp_model_path=sp_path)
 
     rng = random.PRNGKey(42)
-    model = ConsciousnessAwareSNN(num_experts=args.num_experts)
+    model = ConsciousnessAwareSNN(num_experts=args.num_experts,
+                                   sbert_adapter_dim=args.sbert_adapter_dim,
+                                   sbert_dropout=args.sbert_dropout)
     params = model.init(
         {'params': rng},
         jnp.ones((2,384)),

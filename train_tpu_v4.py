@@ -13,8 +13,10 @@ import jax.numpy as jnp
 from jax import random, jit
 from flax import linen as nn
 from flax.training import train_state
+from flax import serialization
 import optax
 from jax import distributed as jdist
+from pathlib import Path
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -281,6 +283,8 @@ def main():
     parser.add_argument('--coordinator-address', default=os.environ.get('COORDINATOR_ADDRESS', 'localhost:12355'))
     parser.add_argument('--num-processes', type=int, default=int(os.environ.get('NUM_PROCESSES', '1')))
     parser.add_argument('--process-id', type=int, default=int(os.environ.get('PROCESS_ID', '0')))
+    parser.add_argument('--ckpt-dir', default=os.environ.get('CKPT_DIR', ''), help='Checkpoint directory (optional)')
+    parser.add_argument('--ckpt-every', type=int, default=0, help='Save checkpoint every N epochs (0=disable)')
     args = parser.parse_args()
 
     # Initialize JAX distributed for TPU pods (run on ALL hosts with unique process_id)
@@ -327,6 +331,20 @@ def main():
     tx = optax.chain(optax.clip_by_global_norm(1.0), optax.adamw(learning_rate=schedule, weight_decay=0.01))
     state = train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
 
+    def save_checkpoint(epoch_idx: int, final: bool=False):
+        if args.process_id != 0:
+            return
+        if not args.ckpt_dir:
+            return
+        ckpt_dir = Path(args.ckpt_dir)
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        tag = 'final' if final else f'epoch_{epoch_idx:04d}'
+        out_path = ckpt_dir / f'ckpt_{tag}.msgpack'
+        data = serialization.to_bytes(state.params)
+        with open(out_path, 'wb') as f:
+            f.write(data)
+        print(f"Saved checkpoint: {out_path}")
+
     print("Starting training...")
     t0 = time.time()
     for epoch in range(args.epochs):
@@ -340,6 +358,11 @@ def main():
         if args.process_id == 0:
             avg_epoch = jnp.mean(jnp.array([m['loss'] for m in metrics_buf]))
             print(f"Epoch {epoch+1}: train_loss={float(avg_epoch):.4f}")
+        if args.ckpt_dir and args.ckpt_every > 0 and ((epoch + 1) % args.ckpt_every == 0):
+            save_checkpoint(epoch + 1, final=False)
+    # final checkpoint
+    if args.ckpt_dir:
+        save_checkpoint(args.epochs, final=True)
     dt = time.time()-t0
     if args.process_id == 0:
         print(f"Done. Elapsed {dt/60:.2f} min")

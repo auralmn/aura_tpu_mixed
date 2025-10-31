@@ -47,15 +47,15 @@ export PATH="$HOME/.local/bin:$PATH"
 export JAX_PLATFORMS=tpu
 
 # 1) Python deps — pin compatible versions and ensure NumPy ≥ 2.0
-# Use python3 -m pip to ensure we're using the correct Python
-python3 -m pip install -U numpy>=2.0.0 --quiet --user
-python3 -m pip install -U jax==0.4.31 jaxlib==0.4.31 flax optax sentence-transformers spacy scikit-learn --quiet --user
+# Use python3.12 -m pip to ensure we're using Python 3.12 (default is 3.10)
+python3.12 -m pip install -U numpy>=2.0.0 --quiet --user
+python3.12 -m pip install -U jax==0.4.31 jaxlib==0.4.31 flax optax sentence-transformers spacy scikit-learn --quiet --user
 
 # 2) SpaCy model (silent ok)
-python3 -m spacy download en_core_web_sm >/dev/null 2>&1 || true
+python3.12 -m spacy download en_core_web_sm >/dev/null 2>&1 || true
 
 # 3) Sanity checks
-python3 - <<'PY'
+python3.12 - <<'PY'
 import numpy as np
 print("NumPy version:", np.__version__)
 import jax
@@ -64,7 +64,7 @@ print("Devices:", jax.devices())
 PY
 
 # 4) Echo next-step run command tailored for this host
-PYTHON_RUNNER="python3"
+PYTHON_RUNNER="python3.12"
 
 cat <<EOF
 

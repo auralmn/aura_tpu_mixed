@@ -535,10 +535,16 @@ def run_torch_xla(args):
             loss = el + il + 0.5*ml + args.diversity_coef*div
             loss.backward()
             k+=1
+            if k <= 5:
+                xm.master_print(f"[XLA] step={k} loss={float(loss.detach().cpu()):.4f}")
             if k % int(os.environ.get('GRAD_ACCUM_STEPS','1')) == 0:
                 xm.optimizer_step(optim, barrier=True)
                 xm.mark_step()
                 if k == 1:
+                    try:
+                        xm.wait_device_ops()
+                    except Exception:
+                        pass
                     compile_watch['active'] = False
                     print("[XLA] First step compiled and executed.", flush=True)
                 optim.zero_grad()

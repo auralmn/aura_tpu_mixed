@@ -356,6 +356,11 @@ def run_torch_xla(args):
     except Exception:
         pass
     device = xm.xla_device()
+    try:
+        xm.master_print(f"[XLA] Using device: {device}")
+        xm.master_print(f"[XLA] Supported TPU devices: {xm.get_xla_supported_devices('TPU')}")
+    except Exception:
+        pass
     tokenizer = AutoTokenizer.from_pretrained(args.sbert_model_name, use_fast=True)
     sbert = AutoModel.from_pretrained(args.sbert_model_name).to(device)
     # Enable gradient checkpointing to save memory if supported
@@ -551,6 +556,15 @@ def main():
     parser.add_argument('--torch-xla', action='store_true', help='Use PyTorch/XLA training pipeline')
     args = parser.parse_args()
 
+    # Torch/XLA path first, skip JAX init/prints entirely
+    if args.torch_xla:
+        try:
+            import torch_xla.core.xla_model as xm
+            print(f"[XLA] Supported devices: {xm.get_xla_supported_devices('TPU')}")
+        except Exception:
+            pass
+        return run_torch_xla(args)
+
     # Initialize JAX distributed for TPU pods (run on ALL hosts with unique process_id)
     if args.num_processes > 1:
         print(f"Initializing JAX distributed: coord={args.coordinator_address}, num_processes={args.num_processes}, process_id={args.process_id}")
@@ -558,9 +572,6 @@ def main():
                          num_processes=args.num_processes,
                          process_id=args.process_id)
     print(f"Devices (pid {args.process_id}/{args.num_processes}): {jax.devices()}")
-    # Torch/XLA path
-    if args.torch_xla:
-        return run_torch_xla(args)
     tokenizer = None
     sbert_flax = None
     sbert_model = None

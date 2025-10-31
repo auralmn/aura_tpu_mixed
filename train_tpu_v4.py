@@ -465,17 +465,17 @@ def main():
     accum_steps = max(1, int(os.environ.get('GRAD_ACCUM_STEPS', os.environ.get('grad_accum_steps', '1'))))
     for epoch in range(args.epochs):
         metrics_buf = []
-        accum_grads = jax.tree_map(lambda x: jnp.zeros_like(x), state.params)
+        accum_grads = jax.tree_util.tree_map(lambda x: jnp.zeros_like(x), state.params)
         k = 0
         for step, batch in enumerate(batches(train_processed, bs=args.batch_size, shuffle=True)):
             grads, metrics = compute_grads(model, sbert_flax, args.use_flax_sbert, state.params, batch,
                                            label_smoothing=args.label_smoothing, diversity_coef=args.diversity_coef)
-            accum_grads = jax.tree_map(lambda a,g: a+g, accum_grads, grads)
+            accum_grads = jax.tree_util.tree_map(lambda a,g: a+g, accum_grads, grads)
             k += 1
             if k == accum_steps:
-                avg_grads = jax.tree_map(lambda g: g / accum_steps, accum_grads)
+                avg_grads = jax.tree_util.tree_map(lambda g: g / accum_steps, accum_grads)
                 state = state.apply_gradients(grads=avg_grads)
-                accum_grads = jax.tree_map(lambda x: jnp.zeros_like(x), state.params)
+                accum_grads = jax.tree_util.tree_map(lambda x: jnp.zeros_like(x), state.params)
                 k = 0
             metrics_buf.append(metrics)
             if (step+1) % 10 == 0 and (args.process_id == 0):
@@ -483,7 +483,7 @@ def main():
                 print(f"  epoch {epoch+1} step {step+1}: loss={float(avg):.4f}")
         # flush leftover grads
         if k > 0:
-            avg_grads = jax.tree_map(lambda g: g / k, accum_grads)
+            avg_grads = jax.tree_util.tree_map(lambda g: g / k, accum_grads)
             state = state.apply_gradients(grads=avg_grads)
         if args.process_id == 0:
             avg_epoch = jnp.mean(jnp.array([m['loss'] for m in metrics_buf]))

@@ -364,8 +364,9 @@ def main():
     if args.use_flax_sbert:
         if AutoTokenizer is None or FlaxAutoModel is None:
             raise RuntimeError('transformers not installed')
-        tokenizer = AutoTokenizer.from_pretrained(args.sbert_model_name)
-        sbert_flax = FlaxAutoModel.from_pretrained(args.sbert_model_name, dtype=jnp.float32)
+        tokenizer = AutoTokenizer.from_pretrained(args.sbert_model_name, use_fast=True)
+        # from_pt=True allows loading PyTorch weights into Flax for supported archs (e.g., RoBERTa/BERT)
+        sbert_flax = FlaxAutoModel.from_pretrained(args.sbert_model_name, dtype=jnp.float32, from_pt=True)
     else:
         if SentenceTransformer is None:
             raise RuntimeError('sentence-transformers not installed')
@@ -393,9 +394,13 @@ def main():
     model = ConsciousnessAwareSNN(num_experts=args.num_experts,
                                    sbert_adapter_dim=args.sbert_adapter_dim,
                                    sbert_dropout=args.sbert_dropout)
+    # Determine SBERT embedding dim for init
+    sbert_hidden_size = 384
+    if args.use_flax_sbert and sbert_flax is not None and hasattr(sbert_flax, 'config'):
+        sbert_hidden_size = int(getattr(sbert_flax.config, 'hidden_size', 768))
     snn_params = model.init(
         {'params': rng},
-        jnp.ones((2,384)),
+        jnp.ones((2, sbert_hidden_size)),
         jnp.ones((2,128,10)),
         jnp.ones((2,128,3)),
         jnp.zeros((2,128), dtype=jnp.int32),

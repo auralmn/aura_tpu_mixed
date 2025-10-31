@@ -340,7 +340,12 @@ def batches(data, bs=128, shuffle=True):
 def run_torch_xla(args):
     import os, sys
     print('[Boot] Entered Torch/XLA pipeline', flush=True)
-    # Lazy-import heavy deps here so early prints are visible
+    # Set single-host PJRT defaults if not provided (v4-32 host has 8 chips)
+    os.environ.setdefault('PJRT_DEVICE', 'TPU')
+    os.environ.setdefault('TPU_CHIPS_PER_HOST_BOUNDS', '2,2,2')
+    os.environ.setdefault('TPU_PROCESS_BOUNDS', '1,1,1')
+    os.environ.setdefault('TPU_VISIBLE_CHIPS', '0,1,2,3,4,5,6,7')
+    # Lazy-import heavy deps here so early prints are visible; torch_xla after env is set
     from transformers import AutoTokenizer, AutoModel
     import torch
     import torch.nn as tnn

@@ -259,10 +259,12 @@ def train_step(model, sbert_flax_module, use_flax_sbert, state, batch,
     def loss_fn(params_all):
         # Compute SBERT embeddings
         if use_flax_sbert:
-            outputs = sbert_flax_module.apply({'params': params_all['sbert']},
-                                              input_ids=batch['sbert_input_ids'],
-                                              attention_mask=batch['sbert_attention_mask'],
-                                              train=True)
+            outputs = sbert_flax_module(
+                input_ids=batch['sbert_input_ids'],
+                attention_mask=batch['sbert_attention_mask'],
+                params=params_all['sbert'],
+                train=True
+            )
             hidden = outputs.last_hidden_state  # [B,L,H]
             mask = batch['sbert_attention_mask'].astype(jnp.float32)
             denom = jnp.clip(jnp.sum(mask, axis=1, keepdims=True), a_min=1.0)
@@ -432,10 +434,12 @@ def main():
 
     def eval_step(params_all, batch):
         if args.use_flax_sbert:
-            outputs = sbert_flax.apply({'params': params_all['sbert']},
-                                       input_ids=batch['sbert_input_ids'],
-                                       attention_mask=batch['sbert_attention_mask'],
-                                       train=False)
+            outputs = sbert_flax(
+                input_ids=batch['sbert_input_ids'],
+                attention_mask=batch['sbert_attention_mask'],
+                params=params_all['sbert'],
+                train=False
+            )
             hidden = outputs.last_hidden_state
             mask = batch['sbert_attention_mask'].astype(jnp.float32)
             denom = jnp.clip(jnp.sum(mask, axis=1, keepdims=True), a_min=1.0)

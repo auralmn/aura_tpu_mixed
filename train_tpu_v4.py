@@ -494,6 +494,19 @@ def run_torch_xla(args):
     model = TorchSNN(sp_vocab=32000, sbert_dim=sbert.config.hidden_size if hasattr(sbert,'config') else 768, num_experts=args.num_experts).to(device)
     optim = topt.AdamW(list(model.parameters())+list(sbert.parameters()), lr=args.lr, weight_decay=0.02)
 
+    # Live XLA metrics while first step compiles
+    from torch_xla.debug import metrics as met
+    import threading, time as _time
+    compile_watch = {'active': True}
+    def _poll_metrics():
+        while compile_watch['active']:
+            try:
+                xm.master_print("[XLA] metrics:\n" + met.metrics_report())
+            except Exception:
+                pass
+            _time.sleep(5)
+    threading.Thread(target=_poll_metrics, daemon=True).start()
+
     def smooth(y, n, eps): return (1-eps)*y + eps/n
     for epoch in range(args.epochs):
         model.train(); sbert.train()
@@ -526,6 +539,7 @@ def run_torch_xla(args):
                 xm.optimizer_step(optim, barrier=True)
                 xm.mark_step()
                 if k == 1:
+                    compile_watch['active'] = False
                     print("[XLA] First step compiled and executed.", flush=True)
                 optim.zero_grad()
             total += loss.item(); cnt += 1

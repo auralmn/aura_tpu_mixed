@@ -265,10 +265,10 @@ def train_step(model, sbert_flax_module, use_flax_sbert, state, batch,
                 params=params_all['sbert'],
                 train=False
             )
-            hidden = outputs.last_hidden_state  # [B,L,H]
+            hidden = outputs.last_hidden_state  # [B,L,H] (bf16)
             mask = batch['sbert_attention_mask'].astype(jnp.float32)
             denom = jnp.clip(jnp.sum(mask, axis=1, keepdims=True), a_min=1.0)
-            sbert_emb = jnp.sum(hidden * mask[..., None], axis=1) / denom
+            sbert_emb = (jnp.sum(hidden * mask[..., None], axis=1) / denom).astype(jnp.float32)
         else:
             sbert_emb = batch['sbert_embedding']
         # Forward SNN
@@ -367,8 +367,8 @@ def main():
         if AutoTokenizer is None or FlaxAutoModel is None:
             raise RuntimeError('transformers not installed')
         tokenizer = AutoTokenizer.from_pretrained(args.sbert_model_name, use_fast=True)
-        # from_pt=True allows loading PyTorch weights into Flax for supported archs (e.g., RoBERTa/BERT)
-        sbert_flax = FlaxAutoModel.from_pretrained(args.sbert_model_name, dtype=jnp.float32, from_pt=True)
+        # Use bfloat16 on TPU to reduce memory; from_pt=True enables Torch→Flax conversion
+        sbert_flax = FlaxAutoModel.from_pretrained(args.sbert_model_name, dtype=jnp.bfloat16, from_pt=True)
     else:
         if SentenceTransformer is None:
             raise RuntimeError('sentence-transformers not installed')
@@ -440,10 +440,10 @@ def main():
                 params=params_all['sbert'],
                 train=False
             )
-            hidden = outputs.last_hidden_state
+            hidden = outputs.last_hidden_state  # (bf16)
             mask = batch['sbert_attention_mask'].astype(jnp.float32)
             denom = jnp.clip(jnp.sum(mask, axis=1, keepdims=True), a_min=1.0)
-            sbert_emb = jnp.sum(hidden * mask[..., None], axis=1) / denom
+            sbert_emb = (jnp.sum(hidden * mask[..., None], axis=1) / denom).astype(jnp.float32)
         else:
             sbert_emb = batch['sbert_embedding']
         out = model.apply({'params': params_all['snn']},
